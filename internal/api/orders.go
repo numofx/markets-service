@@ -70,6 +70,16 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 		return orders.CreateOrderParams{}, fmt.Errorf("action_json must be valid JSON")
 	}
 
+	ownerAddress := strings.ToLower(r.OwnerAddress)
+	signerAddress := strings.ToLower(r.SignerAddress)
+
+	if expectedOwner := strings.ToLower(strings.TrimSpace(cfg.ExpectedOrderOwner)); expectedOwner != "" && ownerAddress != expectedOwner {
+		return orders.CreateOrderParams{}, fmt.Errorf("owner_address must match configured expected owner")
+	}
+	if expectedSigner := strings.ToLower(strings.TrimSpace(cfg.ExpectedOrderSigner)); expectedSigner != "" && signerAddress != expectedSigner {
+		return orders.CreateOrderParams{}, fmt.Errorf("signer_address must match configured expected signer")
+	}
+
 	side := orders.Side(strings.ToLower(r.Side))
 	if side != orders.SideBuy && side != orders.SideSell {
 		return orders.CreateOrderParams{}, fmt.Errorf("side must be 'buy' or 'sell'")
@@ -90,10 +100,14 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 		filledAmount = "0"
 	}
 
+	if err := validateActionJSON(r.ActionJSON, ownerAddress, signerAddress, r.SubaccountID, r.Nonce); err != nil {
+		return orders.CreateOrderParams{}, err
+	}
+
 	return orders.CreateOrderParams{
 		OrderID:       r.OrderID,
-		OwnerAddress:  strings.ToLower(r.OwnerAddress),
-		SignerAddress: strings.ToLower(r.SignerAddress),
+		OwnerAddress:  ownerAddress,
+		SignerAddress: signerAddress,
 		SubaccountID:  r.SubaccountID,
 		RecipientID:   r.RecipientID,
 		Nonce:         r.Nonce,
@@ -121,6 +135,32 @@ func (r cancelOrderRequest) validate() error {
 	}
 	if r.Nonce == "" {
 		return fmt.Errorf("nonce is required")
+	}
+	return nil
+}
+
+func validateActionJSON(raw json.RawMessage, ownerAddress string, signerAddress string, subaccountID string, nonce string) error {
+	var action struct {
+		SubaccountID string `json:"subaccount_id"`
+		Nonce        string `json:"nonce"`
+		Owner        string `json:"owner"`
+		Signer       string `json:"signer"`
+	}
+
+	if err := json.Unmarshal(raw, &action); err != nil {
+		return fmt.Errorf("parse action_json: %w", err)
+	}
+	if action.SubaccountID != subaccountID {
+		return fmt.Errorf("action_json.subaccount_id must match subaccount_id")
+	}
+	if action.Nonce != nonce {
+		return fmt.Errorf("action_json.nonce must match nonce")
+	}
+	if strings.ToLower(action.Owner) != ownerAddress {
+		return fmt.Errorf("action_json.owner must match owner_address")
+	}
+	if strings.ToLower(action.Signer) != signerAddress {
+		return fmt.Errorf("action_json.signer must match signer_address")
 	}
 	return nil
 }

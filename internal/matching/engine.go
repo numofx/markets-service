@@ -2,7 +2,7 @@ package matching
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
@@ -14,27 +14,16 @@ import (
 )
 
 type Engine struct {
-	cfg    config.Config
-	pool   *pgxpool.Pool
-	orders *orders.Repository
-}
-
-type MatchInstruction struct {
-	Market        string       `json:"market"`
-	AssetAddress  string       `json:"asset_address"`
-	ModuleAddress string       `json:"module_address"`
-	Taker         orders.Order `json:"taker"`
-	Maker         orders.Order `json:"maker"`
-	Price         string       `json:"price"`
-	Amount        string       `json:"amount"`
-	ExecutorURL   string       `json:"executor_url"`
+	cfg      config.Config
+	orders   *orders.Repository
+	executor *ExecutorClient
 }
 
 func NewEngine(cfg config.Config, pool *pgxpool.Pool) *Engine {
 	return &Engine{
-		cfg:    cfg,
-		pool:   pool,
-		orders: orders.NewRepository(pool),
+		cfg:      cfg,
+		orders:   orders.NewRepository(pool),
+		executor: NewExecutorClient(cfg.ExecutorURL, cfg.ExecutorManagerData),
 	}
 }
 
@@ -55,21 +44,34 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) tick(ctx context.Context) {
-	bid, ask, err := e.orders.BestBidAndAsk(ctx, e.cfg.BTCPerpAssetAddress, "0")
+	now := time.Now()
+
+	candidate, err := e.orders.AcquireMatchCandidate(ctx, e.cfg.BTCPerpAssetAddress, "0", now)
 	if err != nil {
-		slog.Error("load best bid and ask", "error", err)
+		slog.Error("acquire match candidate", "error", err)
 		return
 	}
-	if bid == nil || ask == nil {
+	if candidate == nil {
 		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "book_not_crossed")
 		return
 	}
-	if bid.IsExpired(time.Now()) || ask.IsExpired(time.Now()) {
+
+	release := true
+	defer func() {
+		if !release {
+			return
+		}
+		if err := e.orders.ReleaseMatch(ctx, candidate.Taker.OrderID, candidate.Maker.OrderID); err != nil {
+			slog.Error("release reserved orders", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+		}
+	}()
+
+	if candidate.Taker.IsExpired(now) || candidate.Maker.IsExpired(now) {
 		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "expired_order_present")
 		return
 	}
 
-	priceCrossed, err := crosses(bid.LimitPrice, ask.LimitPrice)
+	priceCrossed, err := crosses(candidate.Taker, candidate.Maker)
 	if err != nil {
 		slog.Error("compare prices", "error", err)
 		return
@@ -79,31 +81,39 @@ func (e *Engine) tick(ctx context.Context) {
 		return
 	}
 
-	amount, err := minDecimalString(remainingAmount(*bid), remainingAmount(*ask))
+	fillPrice := candidate.Maker.LimitPrice
+	fillAmount, err := minDecimalString(remainingAmount(candidate.Taker), remainingAmount(candidate.Maker))
 	if err != nil {
 		slog.Error("compute fill amount", "error", err)
 		return
 	}
-
-	instruction := MatchInstruction{
-		Market:        "BTC-PERP",
-		AssetAddress:  e.cfg.BTCPerpAssetAddress,
-		ModuleAddress: e.cfg.TradeModuleAddress,
-		Taker:         *ask,
-		Maker:         *bid,
-		Price:         bid.LimitPrice,
-		Amount:        amount,
-		ExecutorURL:   e.cfg.ExecutorURL,
+	if fillAmount == "0" {
+		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "zero_fill")
+		return
 	}
 
-	slog.Info("match candidate ready",
-		"market", instruction.Market,
-		"maker_order_id", instruction.Maker.OrderID,
-		"taker_order_id", instruction.Taker.OrderID,
-		"price", instruction.Price,
-		"amount", instruction.Amount,
+	executorResp, err := e.executor.SubmitMatch(ctx, *candidate, fillPrice, fillAmount)
+	if err != nil {
+		slog.Error("submit match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+		_ = e.orders.MarkMatchFailed(ctx, []string{candidate.Taker.OrderID, candidate.Maker.OrderID}, err.Error())
+		return
+	}
+
+	if err := e.orders.FinalizeMatch(ctx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); err != nil {
+		slog.Error("finalize match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+		return
+	}
+
+	release = false
+
+	slog.Info("match executed",
+		"market", "BTC-PERP",
+		"maker_order_id", candidate.Maker.OrderID,
+		"taker_order_id", candidate.Taker.OrderID,
+		"price", fillPrice,
+		"amount", fillAmount,
+		"tx_hash", executorResp.TxHash,
 	)
-	log.Printf("TODO submit MatchInstruction to executor: %+v", instruction)
 }
 
 func remainingAmount(order orders.Order) string {
@@ -114,16 +124,24 @@ func remainingAmount(order orders.Order) string {
 	return remaining
 }
 
-func crosses(bidPrice string, askPrice string) (bool, error) {
-	bid, ok := new(big.Int).SetString(bidPrice, 10)
+func crosses(taker orders.Order, maker orders.Order) (bool, error) {
+	takerPrice, ok := new(big.Int).SetString(taker.LimitPrice, 10)
 	if !ok {
-		return false, slogError("invalid bid price")
+		return false, slogError("invalid taker price")
 	}
-	ask, ok := new(big.Int).SetString(askPrice, 10)
+	makerPrice, ok := new(big.Int).SetString(maker.LimitPrice, 10)
 	if !ok {
-		return false, slogError("invalid ask price")
+		return false, slogError("invalid maker price")
 	}
-	return bid.Cmp(ask) >= 0, nil
+
+	switch taker.Side {
+	case orders.SideBuy:
+		return takerPrice.Cmp(makerPrice) >= 0, nil
+	case orders.SideSell:
+		return takerPrice.Cmp(makerPrice) <= 0, nil
+	default:
+		return false, fmt.Errorf("unsupported taker side %q", taker.Side)
+	}
 }
 
 func minDecimalString(a string, b string) (string, error) {

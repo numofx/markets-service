@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +38,11 @@ type CreateOrderParams struct {
 type CancelOrderParams struct {
 	OwnerAddress string
 	Nonce        string
+}
+
+type MatchCandidate struct {
+	Taker Order
+	Maker Order
 }
 
 type Repository struct {
@@ -157,12 +164,16 @@ returning order_id, owner_address, signer_address, subaccount_id, recipient_id, 
 }
 
 func (r *Repository) ListBook(ctx context.Context, assetAddress string, subID string, limit int32) ([]Order, []Order, error) {
-	bids, err := r.listBySide(ctx, assetAddress, subID, SideBuy, limit)
+	if err := r.ExpireOrders(ctx, time.Now()); err != nil {
+		return nil, nil, err
+	}
+
+	bids, err := r.listBySide(ctx, strings.ToLower(assetAddress), subID, SideBuy, limit)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	asks, err := r.listBySide(ctx, assetAddress, subID, SideSell, limit)
+	asks, err := r.listBySide(ctx, strings.ToLower(assetAddress), subID, SideSell, limit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -171,17 +182,115 @@ func (r *Repository) ListBook(ctx context.Context, assetAddress string, subID st
 }
 
 func (r *Repository) BestBidAndAsk(ctx context.Context, assetAddress string, subID string) (*Order, *Order, error) {
-	bid, err := r.bestBySide(ctx, assetAddress, subID, SideBuy)
+	if err := r.ExpireOrders(ctx, time.Now()); err != nil {
+		return nil, nil, err
+	}
+
+	bid, err := r.bestBySide(ctx, strings.ToLower(assetAddress), subID, SideBuy)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	ask, err := r.bestBySide(ctx, assetAddress, subID, SideSell)
+	ask, err := r.bestBySide(ctx, strings.ToLower(assetAddress), subID, SideSell)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return bid, ask, nil
+}
+
+func (r *Repository) AcquireMatchCandidate(ctx context.Context, assetAddress string, subID string, now time.Time) (*MatchCandidate, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := expireOrders(ctx, tx, now); err != nil {
+		return nil, err
+	}
+
+	bid, err := lockBestBySide(ctx, tx, strings.ToLower(assetAddress), subID, SideBuy)
+	if err != nil {
+		return nil, err
+	}
+	ask, err := lockBestBySide(ctx, tx, strings.ToLower(assetAddress), subID, SideSell)
+	if err != nil {
+		return nil, err
+	}
+	if bid == nil || ask == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	taker, maker := chooseTakerMaker(*bid, *ask)
+	if err := reserveOrders(ctx, tx, []string{taker.OrderID, maker.OrderID}); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &MatchCandidate{Taker: taker, Maker: maker}, nil
+}
+
+func (r *Repository) ReleaseMatch(ctx context.Context, orderIDs ...string) error {
+	if len(orderIDs) == 0 {
+		return nil
+	}
+
+	const query = `
+update active_orders
+set status = 'active'
+where order_id = any($1) and status = 'matching'
+`
+
+	_, err := r.pool.Exec(ctx, query, orderIDs)
+	return mapPGError(err)
+}
+
+func (r *Repository) MarkMatchFailed(ctx context.Context, orderIDs []string, reason string) error {
+	return r.ReleaseMatch(ctx, orderIDs...)
+}
+
+func (r *Repository) FinalizeMatch(ctx context.Context, takerOrderID string, makerOrderID string, fillAmount string) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := applyFill(ctx, tx, takerOrderID, fillAmount); err != nil {
+		return err
+	}
+	if err := applyFill(ctx, tx, makerOrderID, fillAmount); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *Repository) ExpireOrders(ctx context.Context, now time.Time) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := expireOrders(ctx, tx, now); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (r *Repository) listBySide(ctx context.Context, assetAddress string, subID string, side Side, limit int32) ([]Order, error) {
@@ -232,6 +341,114 @@ func (r *Repository) bestBySide(ctx context.Context, assetAddress string, subID 
 	return &orders[0], nil
 }
 
+func lockBestBySide(ctx context.Context, tx pgx.Tx, assetAddress string, subID string, side Side) (*Order, error) {
+	orderBy := "limit_price desc, created_at asc"
+	if side == SideSell {
+		orderBy = "limit_price asc, created_at asc"
+	}
+
+	query := fmt.Sprintf(`
+select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
+       desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+from active_orders
+where asset_address = $1 and sub_id = $2 and side = $3 and status = 'active'
+order by %s
+limit 1
+for update skip locked
+`, orderBy)
+
+	order, err := scanOrder(tx.QueryRow(ctx, query, assetAddress, subID, side))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &order, nil
+}
+
+func reserveOrders(ctx context.Context, tx pgx.Tx, orderIDs []string) error {
+	const query = `
+update active_orders
+set status = 'matching'
+where order_id = any($1) and status = 'active'
+`
+
+	tag, err := tx.Exec(ctx, query, orderIDs)
+	if err != nil {
+		return mapPGError(err)
+	}
+	if tag.RowsAffected() != int64(len(orderIDs)) {
+		return fmt.Errorf("failed to reserve all orders")
+	}
+	return nil
+}
+
+func expireOrders(ctx context.Context, tx pgx.Tx, now time.Time) error {
+	const query = `
+update active_orders
+set status = 'expired'
+where status = 'active' and expiry <= $1
+`
+
+	_, err := tx.Exec(ctx, query, now.Unix())
+	return mapPGError(err)
+}
+
+func applyFill(ctx context.Context, tx pgx.Tx, orderID string, fillAmount string) error {
+	const selectQuery = `
+select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
+       desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+from active_orders
+where order_id = $1 and status = 'matching'
+for update
+`
+
+	order, err := scanOrder(tx.QueryRow(ctx, selectQuery, orderID))
+	if err != nil {
+		return err
+	}
+
+	newFilledAmount, err := addDecimalString(order.FilledAmount, fillAmount)
+	if err != nil {
+		return err
+	}
+
+	status := StatusActive
+	cmp, err := compareDecimalStrings(newFilledAmount, order.DesiredAmount)
+	if err != nil {
+		return err
+	}
+	switch {
+	case cmp > 0:
+		return fmt.Errorf("fill amount exceeds desired amount for order %s", order.OrderID)
+	case cmp == 0:
+		status = StatusFilled
+	}
+
+	const updateQuery = `
+update active_orders
+set filled_amount = $2, status = $3
+where order_id = $1
+`
+
+	_, err = tx.Exec(ctx, updateQuery, orderID, newFilledAmount, status)
+	return mapPGError(err)
+}
+
+func chooseTakerMaker(left Order, right Order) (Order, Order) {
+	if left.CreatedAt.After(right.CreatedAt) {
+		return left, right
+	}
+	if right.CreatedAt.After(left.CreatedAt) {
+		return right, left
+	}
+	if left.OrderID > right.OrderID {
+		return left, right
+	}
+	return right, left
+}
+
 func scanOrder(row pgx.Row) (Order, error) {
 	var order Order
 	if err := row.Scan(
@@ -278,4 +495,28 @@ func mapPGError(err error) error {
 
 func (o Order) IsExpired(now time.Time) bool {
 	return o.Expiry <= now.Unix()
+}
+
+func addDecimalString(a string, b string) (string, error) {
+	left, ok := new(big.Int).SetString(a, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid decimal value")
+	}
+	right, ok := new(big.Int).SetString(b, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid decimal value")
+	}
+	return new(big.Int).Add(left, right).String(), nil
+}
+
+func compareDecimalStrings(a string, b string) (int, error) {
+	left, ok := new(big.Int).SetString(a, 10)
+	if !ok {
+		return 0, fmt.Errorf("invalid decimal value")
+	}
+	right, ok := new(big.Int).SetString(b, 10)
+	if !ok {
+		return 0, fmt.Errorf("invalid decimal value")
+	}
+	return left.Cmp(right), nil
 }

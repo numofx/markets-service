@@ -13,6 +13,7 @@ const (
 	SideSell Side = "sell"
 
 	StatusActive    Status = "active"
+	StatusMatching  Status = "matching"
 	StatusFilled    Status = "filled"
 	StatusCancelled Status = "cancelled"
 	StatusExpired   Status = "expired"
