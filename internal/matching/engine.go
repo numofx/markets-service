@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,8 @@ type Engine struct {
 	orders   *orders.Repository
 	executor *ExecutorClient
 }
+
+const reconciliationTimeout = 5 * time.Second
 
 func NewEngine(cfg config.Config, pool *pgxpool.Pool) *Engine {
 	return &Engine{
@@ -61,7 +64,9 @@ func (e *Engine) tick(ctx context.Context) {
 		if !release {
 			return
 		}
-		if err := e.orders.ReleaseMatch(ctx, candidate.Taker.OrderID, candidate.Maker.OrderID); err != nil {
+		reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
+		defer cancel()
+		if err := e.orders.ReleaseMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID); err != nil {
 			slog.Error("release reserved orders", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		}
 	}()
@@ -94,12 +99,40 @@ func (e *Engine) tick(ctx context.Context) {
 
 	executorResp, err := e.executor.SubmitMatch(ctx, *candidate, fillPrice, fillAmount)
 	if err != nil {
+		reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
+		defer cancel()
+
+		if shouldFinalizeAfterExecutorError(err) {
+			if finalizeErr := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); finalizeErr != nil {
+				slog.Error("reconcile already-filled match",
+					"taker_order_id", candidate.Taker.OrderID,
+					"maker_order_id", candidate.Maker.OrderID,
+					"executor_error", err,
+					"error", finalizeErr,
+				)
+				return
+			}
+
+			release = false
+			slog.Warn("reconciled match after executor error",
+				"market", "BTC-PERP",
+				"maker_order_id", candidate.Maker.OrderID,
+				"taker_order_id", candidate.Taker.OrderID,
+				"price", fillPrice,
+				"amount", fillAmount,
+				"executor_error", err,
+			)
+			return
+		}
+
 		slog.Error("submit match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
-		_ = e.orders.MarkMatchFailed(ctx, []string{candidate.Taker.OrderID, candidate.Maker.OrderID}, err.Error())
+		_ = e.orders.MarkMatchFailed(reconcileCtx, []string{candidate.Taker.OrderID, candidate.Maker.OrderID}, err.Error())
 		return
 	}
 
-	if err := e.orders.FinalizeMatch(ctx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); err != nil {
+	reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
+	defer cancel()
+	if err := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); err != nil {
 		slog.Error("finalize match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		return
 	}
@@ -176,6 +209,24 @@ func subtractDecimalString(a string, b string) (string, error) {
 
 func slogError(message string) error {
 	return &matcherError{message: message}
+}
+
+func detachedContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := parent.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func shouldFinalizeAfterExecutorError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := err.Error()
+	return strings.Contains(message, "TM_FillLimitCrossed") || strings.Contains(message, "0xfea8fa6f")
 }
 
 type matcherError struct {

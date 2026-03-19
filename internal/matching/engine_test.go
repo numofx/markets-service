@@ -61,3 +61,46 @@ func TestCrosses(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldFinalizeAfterExecutorError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "decoded contract error name",
+			err:  errString("executor returned status 500: TM_FillLimitCrossed()"),
+			want: true,
+		},
+		{
+			name: "raw contract selector",
+			err:  errString("executor returned status 500: 0xfea8fa6f"),
+			want: true,
+		},
+		{
+			name: "unrelated executor error",
+			err:  errString("executor returned status 500: connection reset"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldFinalizeAfterExecutorError(tt.err); got != tt.want {
+				t.Fatalf("shouldFinalizeAfterExecutorError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
+}
