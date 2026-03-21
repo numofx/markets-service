@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +17,7 @@ import (
 	"github.com/numofx/matching-backend/internal/instruments"
 	oraclemodule "github.com/numofx/matching-backend/internal/oracles/btcvar30"
 	"github.com/numofx/matching-backend/internal/orders"
+	"github.com/numofx/matching-backend/internal/pricing"
 )
 
 type oracleReader interface {
@@ -29,6 +31,86 @@ type Server struct {
 	orders      *orders.Repository
 	instruments *instruments.Registry
 	oracle      oracleReader
+}
+
+type marketPresentation struct {
+	Market           string `json:"market"`
+	PriceSemantics   string `json:"price_semantics,omitempty"`
+	DisplaySemantics string `json:"display_semantics,omitempty"`
+	DisplayName      string `json:"display_name,omitempty"`
+	DisplayLabel     string `json:"display_label,omitempty"`
+	TickSize         string `json:"tick_size,omitempty"`
+	SettlementNote   string `json:"settlement_note,omitempty"`
+	PricingModel     string `json:"pricing_model,omitempty"`
+	DisplayPriceKind string `json:"display_price_kind,omitempty"`
+	AssetAddress     string `json:"asset_address,omitempty"`
+	SubID            string `json:"sub_id,omitempty"`
+}
+
+type presentedOrder struct {
+	OrderID         string          `json:"order_id"`
+	OwnerAddress    string          `json:"owner_address"`
+	SignerAddress   string          `json:"signer_address"`
+	SubaccountID    string          `json:"subaccount_id"`
+	RecipientID     string          `json:"recipient_id"`
+	Nonce           string          `json:"nonce"`
+	Side            orders.Side     `json:"side"`
+	AssetAddress    string          `json:"asset_address"`
+	SubID           string          `json:"sub_id"`
+	DesiredAmount   string          `json:"desired_amount"`
+	FilledAmount    string          `json:"filled_amount"`
+	LimitPrice      string          `json:"limit_price"`
+	WorstFee        string          `json:"worst_fee"`
+	Expiry          int64           `json:"expiry"`
+	ActionJSON      json.RawMessage `json:"action_json"`
+	Signature       string          `json:"signature"`
+	Status          orders.Status   `json:"status"`
+	CreatedAt       time.Time       `json:"created_at"`
+	Market          string          `json:"market,omitempty"`
+	VariancePrice   float64         `json:"variance_price,omitempty"`
+	VolPercent      float64         `json:"vol_percent,omitempty"`
+	PriceSemantics  string          `json:"price_semantics,omitempty"`
+	DisplayName     string          `json:"display_name,omitempty"`
+	DisplayLabel    string          `json:"display_label,omitempty"`
+	DisplaySemantic string          `json:"display_semantics,omitempty"`
+	TickSize        string          `json:"tick_size,omitempty"`
+}
+
+type orderResponse struct {
+	Order presentedOrder `json:"order"`
+}
+
+type bookResponse struct {
+	MarketPresentation marketPresentation `json:"market_presentation"`
+	Bids               []presentedOrder   `json:"bids"`
+	Asks               []presentedOrder   `json:"asks"`
+}
+
+type oraclePayloadResponse struct {
+	Symbol             string    `json:"symbol"`
+	Market             string    `json:"market"`
+	PriceSemantics     string    `json:"price_semantics"`
+	DisplaySemantics   string    `json:"display_semantics"`
+	DisplayName        string    `json:"display_name"`
+	TickSize           string    `json:"tick_size"`
+	Source             string    `json:"source"`
+	Timestamp          time.Time `json:"timestamp"`
+	Vol30D             float64   `json:"vol_30d"`
+	Variance30D        float64   `json:"variance_30d"`
+	VolPercent         float64   `json:"vol_percent"`
+	MethodologyVersion string    `json:"methodology_version"`
+	Signature          string    `json:"signature,omitempty"`
+	Stale              bool      `json:"stale,omitempty"`
+}
+
+type oracleHistoryResponse struct {
+	Symbol           string                  `json:"symbol"`
+	Market           string                  `json:"market"`
+	PriceSemantics   string                  `json:"price_semantics"`
+	DisplaySemantics string                  `json:"display_semantics"`
+	DisplayName      string                  `json:"display_name"`
+	TickSize         string                  `json:"tick_size"`
+	History          []oraclePayloadResponse `json:"history"`
 }
 
 func NewServer(cfg config.Config, pool *pgxpool.Pool, registry *instruments.Registry, oracle oracleReader) *Server {
@@ -72,12 +154,10 @@ func (s *Server) handleBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"market":        market.Symbol,
-		"asset_address": strings.ToLower(market.AssetAddress),
-		"sub_id":        market.SubID,
-		"bids":          bids,
-		"asks":          asks,
+	writeJSON(w, http.StatusOK, bookResponse{
+		MarketPresentation: presentMarket(market),
+		Bids:               presentOrders(bids, market),
+		Asks:               presentOrders(asks, market),
 	})
 }
 
@@ -105,7 +185,8 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{"order": order})
+	instrument, _ := s.instruments.ByAssetAddress(strings.ToLower(order.AssetAddress))
+	writeJSON(w, http.StatusCreated, orderResponse{Order: presentOrder(order, instrument)})
 }
 
 func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +215,8 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"order": order})
+	instrument, _ := s.instruments.ByAssetAddress(strings.ToLower(order.AssetAddress))
+	writeJSON(w, http.StatusOK, orderResponse{Order: presentOrder(order, instrument)})
 }
 
 func (s *Server) handleBTCVar30Latest(w http.ResponseWriter, _ *http.Request) {
@@ -149,7 +231,7 @@ func (s *Server) handleBTCVar30Latest(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, decorateBTCVar30OraclePayload(payload))
 }
 
 func (s *Server) handleBTCVar30History(w http.ResponseWriter, r *http.Request) {
@@ -175,9 +257,14 @@ func (s *Server) handleBTCVar30History(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"symbol":  oraclemodule.Symbol,
-		"history": items,
+	writeJSON(w, http.StatusOK, oracleHistoryResponse{
+		Symbol:           oraclemodule.Symbol,
+		Market:           "BTCVAR30-PERP",
+		PriceSemantics:   instruments.PricingModelVariance,
+		DisplaySemantics: instruments.DisplayPriceVolPercent,
+		DisplayName:      "BTC 30D Implied Volatility Perpetual",
+		TickSize:         "0.0001",
+		History:          decorateBTCVar30OracleHistory(items),
 	})
 }
 
@@ -208,4 +295,100 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func presentOrders(items []orders.Order, instrument instruments.Metadata) []presentedOrder {
+	if len(items) == 0 {
+		return nil
+	}
+
+	presented := make([]presentedOrder, 0, len(items))
+	for _, item := range items {
+		presented = append(presented, presentOrder(item, instrument))
+	}
+	return presented
+}
+
+func presentOrder(order orders.Order, instrument instruments.Metadata) presentedOrder {
+	presented := presentedOrder{
+		OrderID:         order.OrderID,
+		OwnerAddress:    order.OwnerAddress,
+		SignerAddress:   order.SignerAddress,
+		SubaccountID:    order.SubaccountID,
+		RecipientID:     order.RecipientID,
+		Nonce:           order.Nonce,
+		Side:            order.Side,
+		AssetAddress:    order.AssetAddress,
+		SubID:           order.SubID,
+		DesiredAmount:   order.DesiredAmount,
+		FilledAmount:    order.FilledAmount,
+		LimitPrice:      order.LimitPrice,
+		WorstFee:        order.WorstFee,
+		Expiry:          order.Expiry,
+		ActionJSON:      order.ActionJSON,
+		Signature:       order.Signature,
+		Status:          order.Status,
+		CreatedAt:       order.CreatedAt,
+		Market:          instrument.Symbol,
+		PriceSemantics:  instrument.PriceSemantics,
+		DisplayName:     instrument.DisplayName,
+		DisplayLabel:    instrument.DisplayLabel,
+		DisplaySemantic: instrument.DisplaySemantics,
+		TickSize:        instrument.TickSize,
+	}
+	if instrument.PricingModel != instruments.PricingModelVariance {
+		return presented
+	}
+
+	display, err := pricing.VarianceDisplayFromTicks(instrument, order.LimitPriceTicks)
+	if err != nil {
+		return presented
+	}
+
+	presented.VariancePrice = display.VariancePrice
+	presented.VolPercent = display.VolPercent
+	return presented
+}
+
+func presentMarket(market instruments.Metadata) marketPresentation {
+	return marketPresentation{
+		Market:           market.Symbol,
+		PriceSemantics:   market.PriceSemantics,
+		DisplaySemantics: market.DisplaySemantics,
+		DisplayName:      market.DisplayName,
+		DisplayLabel:     market.DisplayLabel,
+		TickSize:         market.TickSize,
+		SettlementNote:   market.SettlementNote,
+		PricingModel:     market.PricingModel,
+		DisplayPriceKind: market.DisplayPriceKind,
+		AssetAddress:     strings.ToLower(market.AssetAddress),
+		SubID:            market.SubID,
+	}
+}
+
+func decorateBTCVar30OraclePayload(payload oraclemodule.Payload) oraclePayloadResponse {
+	return oraclePayloadResponse{
+		Symbol:             payload.Symbol,
+		Market:             "BTCVAR30-PERP",
+		PriceSemantics:     instruments.PricingModelVariance,
+		DisplaySemantics:   instruments.DisplayPriceVolPercent,
+		DisplayName:        "BTC 30D Implied Volatility Perpetual",
+		TickSize:           "0.0001",
+		Source:             payload.Source,
+		Timestamp:          payload.Timestamp,
+		Vol30D:             payload.Vol30D,
+		Variance30D:        payload.Variance30D,
+		VolPercent:         pricing.RoundVolPercent(pricing.VarianceToVolPercent(payload.Variance30D)),
+		MethodologyVersion: payload.MethodologyVersion,
+		Signature:          payload.Signature,
+		Stale:              payload.Stale,
+	}
+}
+
+func decorateBTCVar30OracleHistory(items []oraclemodule.Payload) []oraclePayloadResponse {
+	decorated := make([]oraclePayloadResponse, 0, len(items))
+	for _, item := range items {
+		decorated = append(decorated, decorateBTCVar30OraclePayload(item))
+	}
+	return decorated
 }

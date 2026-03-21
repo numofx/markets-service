@@ -1,5 +1,7 @@
 # matching-backend
 
+BTCVAR30 prices are submitted in variance, displayed in volatility, and settled in variance.
+
 Thin offchain backend for the `matching` contracts.
 
 Initial scope:
@@ -136,6 +138,66 @@ Example latest response:
 ```text
 funding_rate = clamp((mark_price - oracle_variance_30d) * BTCVAR30_FUNDING_COEFF, -BTCVAR30_FUNDING_CAP, BTCVAR30_FUNDING_CAP)
 ```
+
+`BTCVAR30-PERP` is canonical in the backend and is variance-native end to end:
+
+- engine, matching, executor, funding, and persistence operate on 30D implied variance
+- canonical internal price is fixed-point variance ticks
+- conversion to vol percent is presentation-only
+- all prices are variance; volatility is display-only
+
+Example:
+
+```text
+displayed variance price = 0.2728
+tick size = 0.0001
+internal ticks = 2728
+displayed vol percent = sqrt(0.2728) * 100 = 52.23%
+```
+
+- `0.25` variance = `50%` implied volatility
+- `BTCVAR30` prices are submitted in variance, not vol points
+
+Canonical API example:
+
+```json
+{
+  "market": "BTCVAR30-PERP",
+  "limit_price": 0.2728,
+  "variance_price": 0.2728,
+  "vol_percent": 52.23,
+  "price_semantics": "variance"
+}
+```
+
+Invariant:
+
+```text
+pnl = (var_exit - var_entry) * notional
+```
+
+Never:
+
+```text
+pnl = (vol_exit - vol_entry) * notional
+```
+
+FAQ:
+
+- Why is the UI in vol if the engine is variance?
+  Traders think in implied vol, but variance gives linear settlement and linear PnL.
+- Why does `0.25` correspond to `50%` vol?
+  Because `sqrt(0.25) * 100 = 50`.
+- Why is BTCVAR30 still called a vol perpetual externally?
+  It is marketed as a vol product while the backend settles in variance.
+
+| Concept | Unit |
+|---------|------|
+| Canonical submitted price | variance |
+| Internal ticks | 0.0001 variance |
+| Display mark | vol percent |
+| PnL | variance change |
+| Funding | variance space |
 
 Safety rules:
 

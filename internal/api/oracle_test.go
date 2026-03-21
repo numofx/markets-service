@@ -49,12 +49,21 @@ func TestHandleBTCVar30Latest(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 
-	var payload oraclemodule.Payload
+	var payload oraclePayloadResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if payload.Symbol != oraclemodule.Symbol {
 		t.Fatalf("symbol = %s", payload.Symbol)
+	}
+	if payload.Market != "BTCVAR30-PERP" {
+		t.Fatalf("market = %s", payload.Market)
+	}
+	if payload.PriceSemantics != "variance" {
+		t.Fatalf("price semantics = %s", payload.PriceSemantics)
+	}
+	if payload.VolPercent == 0 {
+		t.Fatal("expected vol_percent")
 	}
 }
 
@@ -82,13 +91,22 @@ func TestHandleBTCVar30History(t *testing.T) {
 	}
 
 	var response struct {
-		Symbol  string                 `json:"symbol"`
-		History []oraclemodule.Payload `json:"history"`
+		Symbol         string                  `json:"symbol"`
+		Market         string                  `json:"market"`
+		PriceSemantics string                  `json:"price_semantics"`
+		DisplayName    string                  `json:"display_name"`
+		History        []oraclePayloadResponse `json:"history"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if len(response.History) != 1 {
 		t.Fatalf("history length = %d", len(response.History))
+	}
+	if response.PriceSemantics != "variance" {
+		t.Fatalf("price semantics = %s", response.PriceSemantics)
+	}
+	if response.History[0].VolPercent == 0 {
+		t.Fatal("expected vol_percent in history response")
 	}
 }

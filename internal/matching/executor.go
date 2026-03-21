@@ -40,8 +40,10 @@ type TradeOrderData struct {
 type TradeFillDetail struct {
 	FilledAccount string `json:"filled_account"`
 	AmountFilled  string `json:"amount_filled"`
-	Price         string `json:"price"`
-	Fee           string `json:"fee"`
+	// Price is always the canonical internal price. For BTCVAR30-PERP that means
+	// variance-price ticks, not vol points.
+	Price string `json:"price"`
+	Fee   string `json:"fee"`
 }
 
 type ExecutorResponse struct {

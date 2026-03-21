@@ -1,6 +1,7 @@
 package btcvar30
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,14 @@ func TestDerive(t *testing.T) {
 	}
 	if derived.Variance30D != 0.4096 {
 		t.Fatalf("variance = %v", derived.Variance30D)
+	}
+}
+
+func TestDeriveRoundTripsVarianceAndVol(t *testing.T) {
+	derived := Derive(52.23)
+	roundtripVol := math.Sqrt(derived.Variance30D) * 100
+	if math.Abs(roundtripVol-52.23) > 0.01 {
+		t.Fatalf("roundtrip vol = %v", roundtripVol)
 	}
 }
 

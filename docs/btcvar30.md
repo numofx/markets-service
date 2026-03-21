@@ -1,5 +1,7 @@
 # BTCVAR30 Architecture Note
 
+BTCVAR30 prices are submitted in variance, displayed in volatility, and settled in variance.
+
 ## Overview
 
 The v1 BTCVAR30 implementation stays inside `matching-backend` and splits into four small pieces:
@@ -12,6 +14,64 @@ The v1 BTCVAR30 implementation stays inside `matching-backend` and splits into f
    Instrument metadata registry including `BTCVAR30-PERP`.
 4. `internal/funding`
    Funding loop that reads the latest oracle payload and current book midpoint mark.
+
+## Pricing Invariant
+
+`BTCVAR30-PERP` is canonical in the backend and all economics are variance-native.
+
+- Engine in variance, UI in vol.
+- All prices are variance; volatility is display-only.
+- Internal matching/executor price uses fixed-point variance ticks.
+- `2728` means `0.2728` displayed variance with tick size `0.0001`.
+- `0.25` variance = `50%` implied volatility.
+- Displayed vol percent is derived only for presentation:
+
+```text
+vol_percent = sqrt(variance_price) * 100
+```
+
+- PnL is linear in variance:
+
+```text
+pnl = (var_exit - var_entry) * notional
+```
+
+- PnL must never be computed linearly in vol.
+
+Canonical API example:
+
+```json
+{
+  "market": "BTCVAR30-PERP",
+  "limit_price": 0.2728,
+  "variance_price": 0.2728,
+  "vol_percent": 52.23,
+  "price_semantics": "variance"
+}
+```
+
+Warning:
+
+```text
+BTCVAR30 prices are submitted in variance, not vol points.
+```
+
+| Concept | Unit |
+|---------|------|
+| Canonical submitted price | variance |
+| Internal ticks | 0.0001 variance |
+| Display mark | vol percent |
+| PnL | variance change |
+| Funding | variance space |
+
+FAQ:
+
+- What unit is submitted?
+  Variance.
+- What unit is displayed?
+  Implied vol percent.
+- What unit drives PnL and funding?
+  Variance.
 
 ## Data Flow
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/numofx/matching-backend/internal/config"
 	"github.com/numofx/matching-backend/internal/instruments"
+	btcvar30instrument "github.com/numofx/matching-backend/internal/instruments/btcvar30"
 	"github.com/numofx/matching-backend/internal/orders"
 	"github.com/numofx/matching-backend/internal/pricing"
 )
@@ -109,6 +110,11 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 	if err != nil {
 		return orders.CreateOrderParams{}, err
 	}
+	if instrument.Symbol == btcvar30instrument.Symbol {
+		if err := validateBTCVar30VariancePrice(normalizedPrice); err != nil {
+			return orders.CreateOrderParams{}, err
+		}
+	}
 
 	subID := r.SubID
 	if subID == "" {
@@ -143,6 +149,18 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 		ActionJSON:      r.ActionJSON,
 		Signature:       r.Signature,
 	}, nil
+}
+
+func validateBTCVar30VariancePrice(price string) error {
+	value, err := pricing.ParseVarianceFloat64(price)
+	if err != nil {
+		return err
+	}
+
+	if value > 5.0 || value < btcvar30instrument.MinVariancePrice || value > btcvar30instrument.MaxVariancePrice {
+		return fmt.Errorf("BTCVAR30 prices are variance, not volatility. Example: 0.25 = 50%% vol")
+	}
+	return nil
 }
 
 type cancelOrderRequest struct {

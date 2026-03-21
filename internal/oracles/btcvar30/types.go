@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/numofx/matching-backend/internal/pricing"
 )
 
 const (
@@ -32,7 +34,7 @@ type Derivation struct {
 func Derive(vol30D float64) Derivation {
 	return Derivation{
 		Vol30D:      vol30D,
-		Variance30D: (vol30D / 100.0) * (vol30D / 100.0),
+		Variance30D: pricing.VolPercentToVariance(vol30D),
 	}
 }
 

@@ -131,6 +131,8 @@ func (s *Service) Refresh(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.logger.Info("btcvar30 oracle update success",
+		"market", "BTCVAR30-PERP",
+		"price_semantics", "variance",
 		"timestamp", payload.Timestamp,
 		"vol_30d", payload.Vol30D,
 		"variance_30d", payload.Variance30D,

@@ -2,6 +2,15 @@ package instruments
 
 import "time"
 
+const (
+	PricingModelLinear   = "linear"
+	PricingModelVariance = "variance"
+	PricingModelVol      = "volatility"
+
+	DisplayPriceDirect     = "direct"
+	DisplayPriceVolPercent = "vol_percent"
+)
+
 type Metadata struct {
 	Symbol             string        `json:"symbol"`
 	AssetAddress       string        `json:"asset_address"`
@@ -10,6 +19,13 @@ type Metadata struct {
 	MinSize            string        `json:"min_size"`
 	ContractMultiplier string        `json:"contract_multiplier"`
 	QuotePrecision     int           `json:"quote_precision"`
+	PricingModel       string        `json:"pricing_model,omitempty"`
+	PriceSemantics     string        `json:"price_semantics,omitempty"`
+	DisplayPriceKind   string        `json:"display_price_kind,omitempty"`
+	DisplaySemantics   string        `json:"display_semantics,omitempty"`
+	DisplayLabel       string        `json:"display_label,omitempty"`
+	DisplayName        string        `json:"display_name,omitempty"`
+	SettlementNote     string        `json:"settlement_note,omitempty"`
 	FundingInterval    time.Duration `json:"-"`
 	Enabled            bool          `json:"enabled"`
 }

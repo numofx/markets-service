@@ -49,3 +49,11 @@ func TestCalculateFunding(t *testing.T) {
 		})
 	}
 }
+
+func TestCalculateFundingRemainsVarianceNative(t *testing.T) {
+	got := CalculateFunding(0.2728, 0.2714, 0.10, 0.05)
+	want := (0.2728 - 0.2714) * 0.10
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("CalculateFunding() = %v, want %v", got, want)
+	}
+}

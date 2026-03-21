@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -21,14 +20,14 @@ type OracleReader interface {
 }
 
 type Snapshot struct {
-	Symbol           string    `json:"symbol"`
-	Timestamp        time.Time `json:"timestamp"`
-	MarkPrice        float64   `json:"mark_price"`
-	OracleVariance30 float64   `json:"oracle_variance_30d"`
-	Premium          float64   `json:"premium"`
-	FundingRate      float64   `json:"funding_rate"`
-	Paused           bool      `json:"paused"`
-	Reason           string    `json:"reason,omitempty"`
+	Symbol            string    `json:"symbol"`
+	Timestamp         time.Time `json:"timestamp"`
+	VarianceMarkPrice float64   `json:"variance_mark_price"`
+	OracleVariance30  float64   `json:"oracle_variance_30d"`
+	VariancePremium   float64   `json:"variance_premium"`
+	FundingRate       float64   `json:"funding_rate"`
+	Paused            bool      `json:"paused"`
+	Reason            string    `json:"reason,omitempty"`
 }
 
 type Service struct {
@@ -123,16 +122,20 @@ func (s *Service) refresh(ctx context.Context) error {
 		return err
 	}
 
-	snapshot.MarkPrice = markPrice
+	snapshot.VarianceMarkPrice = markPrice
 	snapshot.OracleVariance30 = payload.Variance30D
-	snapshot.Premium = snapshot.MarkPrice - snapshot.OracleVariance30
-	snapshot.FundingRate = clamp(snapshot.Premium*s.coefficient, -s.cap, s.cap)
+	snapshot.VariancePremium = snapshot.VarianceMarkPrice - snapshot.OracleVariance30
+	snapshot.FundingRate = clamp(snapshot.VariancePremium*s.coefficient, -s.cap, s.cap)
 
 	s.store(snapshot)
 	s.logger.Info("btcvar30 funding calculation",
 		"symbol", snapshot.Symbol,
-		"mark_price", snapshot.MarkPrice,
+		"market", s.instrument.Symbol,
+		"price_semantics", s.instrument.PriceSemantics,
+		"variance_mark_price", snapshot.VarianceMarkPrice,
+		"vol_percent", pricing.RoundVolPercent(pricing.VarianceToVolPercent(snapshot.VarianceMarkPrice)),
 		"oracle_variance_30d", snapshot.OracleVariance30,
+		"variance_premium", snapshot.VariancePremium,
 		"funding_rate", snapshot.FundingRate,
 		"paused", snapshot.Paused,
 	)
@@ -184,17 +187,5 @@ func clamp(value float64, floor float64, cap float64) float64 {
 }
 
 func (s *Service) priceTicksToFloat(value string) (float64, error) {
-	converter, err := pricing.NewConverter(s.instrument)
-	if err != nil {
-		return 0, err
-	}
-	display, err := converter.FormatTicks(value)
-	if err != nil {
-		return 0, err
-	}
-	parsed, err := strconv.ParseFloat(display, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse decimal %q: %w", display, err)
-	}
-	return parsed, nil
+	return pricing.TicksToVarianceFloat64(s.instrument, value)
 }

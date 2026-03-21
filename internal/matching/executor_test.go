@@ -63,6 +63,45 @@ func TestBuildExecutorRequest(t *testing.T) {
 	}
 }
 
+func TestBuildExecutorRequestForBTCVar30Market(t *testing.T) {
+	candidate := orders.MatchCandidate{
+		Taker: orders.Order{
+			OrderID:       "taker-btcvar30",
+			OwnerAddress:  "0xowner1",
+			SignerAddress: "0xsigner1",
+			AssetAddress:  "0x2222222222222222222222222222222222222222",
+			SubaccountID:  "501",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"501","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xowner1","signer":"0xsigner1"}`),
+			Signature:     "0xsig1",
+			Nonce:         "1",
+		},
+		Maker: orders.Order{
+			OrderID:       "maker-btcvar30",
+			OwnerAddress:  "0xowner2",
+			SignerAddress: "0xsigner2",
+			SubaccountID:  "502",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"502","nonce":"2","module":"0xtrade","data":"0xbbb","expiry":"100","owner":"0xowner2","signer":"0xsigner2"}`),
+			Signature:     "0xsig2",
+			Nonce:         "2",
+		},
+	}
+
+	req, err := buildExecutorRequest("BTCVAR30-PERP", candidate, "0xfeed", "2728", "3")
+	if err != nil {
+		t.Fatalf("buildExecutorRequest returned error: %v", err)
+	}
+
+	if req.Market != "BTCVAR30-PERP" {
+		t.Fatalf("market = %s", req.Market)
+	}
+	if req.AssetAddress != "0x2222222222222222222222222222222222222222" {
+		t.Fatalf("asset address = %s", req.AssetAddress)
+	}
+	if req.OrderData.FillDetails[0].Price != "2728" {
+		t.Fatalf("price = %s", req.OrderData.FillDetails[0].Price)
+	}
+}
+
 func TestExecutorClientSubmitMatch(t *testing.T) {
 	candidate := orders.MatchCandidate{
 		Taker: orders.Order{
