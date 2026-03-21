@@ -59,3 +59,67 @@ func TestCreateOrderRequestToParamsRejectsUnexpectedConfiguredSigner(t *testing.
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestCreateOrderRequestToParamsParsesBTCVar30DecimalPrice(t *testing.T) {
+	req := createOrderRequest{
+		OrderID:       "order-1",
+		OwnerAddress:  "0xabc",
+		SignerAddress: "0xabc",
+		SubaccountID:  "10",
+		RecipientID:   "10",
+		Nonce:         "1",
+		Side:          "buy",
+		AssetAddress:  "0xvar",
+		SubID:         "0",
+		DesiredAmount: "100",
+		FilledAmount:  "0",
+		LimitPrice:    "0.2724",
+		WorstFee:      "1",
+		Expiry:        time.Now().Add(time.Hour).Unix(),
+		ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xabc","signer":"0xabc"}`),
+		Signature:     "0xsig",
+	}
+
+	params, err := req.toParams(config.Config{
+		BTCVar30Enabled:      true,
+		BTCVar30AssetAddress: "0xvar",
+	})
+	if err != nil {
+		t.Fatalf("toParams returned error: %v", err)
+	}
+	if params.LimitPrice != "0.2724" {
+		t.Fatalf("display limit price = %s", params.LimitPrice)
+	}
+	if params.LimitPriceTicks != "2724" {
+		t.Fatalf("limit price ticks = %s", params.LimitPriceTicks)
+	}
+}
+
+func TestCreateOrderRequestToParamsRejectsOffTickBTCVar30Price(t *testing.T) {
+	req := createOrderRequest{
+		OrderID:       "order-1",
+		OwnerAddress:  "0xabc",
+		SignerAddress: "0xabc",
+		SubaccountID:  "10",
+		RecipientID:   "10",
+		Nonce:         "1",
+		Side:          "buy",
+		AssetAddress:  "0xvar",
+		SubID:         "0",
+		DesiredAmount: "100",
+		FilledAmount:  "0",
+		LimitPrice:    "0.27245",
+		WorstFee:      "1",
+		Expiry:        time.Now().Add(time.Hour).Unix(),
+		ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xabc","signer":"0xabc"}`),
+		Signature:     "0xsig",
+	}
+
+	_, err := req.toParams(config.Config{
+		BTCVar30Enabled:      true,
+		BTCVar30AssetAddress: "0xvar",
+	})
+	if err == nil || err.Error() != "price must align to tick size 0.0001" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

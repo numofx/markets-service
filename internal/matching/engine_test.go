@@ -19,26 +19,32 @@ func TestCrosses(t *testing.T) {
 	}{
 		{
 			name:  "buy taker crosses lower sell maker",
-			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "100", CreatedAt: now},
-			maker: orders.Order{Side: orders.SideSell, LimitPrice: "90", CreatedAt: now.Add(-time.Second)},
+			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "100", LimitPriceTicks: "100", CreatedAt: now},
+			maker: orders.Order{Side: orders.SideSell, LimitPrice: "90", LimitPriceTicks: "90", CreatedAt: now.Add(-time.Second)},
 			want:  true,
 		},
 		{
 			name:  "sell taker crosses higher buy maker",
-			taker: orders.Order{Side: orders.SideSell, LimitPrice: "90", CreatedAt: now},
-			maker: orders.Order{Side: orders.SideBuy, LimitPrice: "100", CreatedAt: now.Add(-time.Second)},
+			taker: orders.Order{Side: orders.SideSell, LimitPrice: "90", LimitPriceTicks: "90", CreatedAt: now},
+			maker: orders.Order{Side: orders.SideBuy, LimitPrice: "100", LimitPriceTicks: "100", CreatedAt: now.Add(-time.Second)},
 			want:  true,
 		},
 		{
 			name:  "buy taker does not cross",
-			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "80", CreatedAt: now},
-			maker: orders.Order{Side: orders.SideSell, LimitPrice: "90", CreatedAt: now.Add(-time.Second)},
+			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "80", LimitPriceTicks: "80", CreatedAt: now},
+			maker: orders.Order{Side: orders.SideSell, LimitPrice: "90", LimitPriceTicks: "90", CreatedAt: now.Add(-time.Second)},
 			want:  false,
 		},
 		{
+			name:  "decimal display prices cross when canonical ticks cross",
+			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "0.2725", LimitPriceTicks: "2725", CreatedAt: now},
+			maker: orders.Order{Side: orders.SideSell, LimitPrice: "0.2724", LimitPriceTicks: "2724", CreatedAt: now.Add(-time.Second)},
+			want:  true,
+		},
+		{
 			name:    "invalid price",
-			taker:   orders.Order{Side: orders.SideBuy, LimitPrice: "bad", CreatedAt: now},
-			maker:   orders.Order{Side: orders.SideSell, LimitPrice: "90", CreatedAt: now.Add(-time.Second)},
+			taker:   orders.Order{Side: orders.SideBuy, LimitPrice: "bad", LimitPriceTicks: "bad", CreatedAt: now},
+			maker:   orders.Order{Side: orders.SideSell, LimitPrice: "90", LimitPriceTicks: "90", CreatedAt: now.Add(-time.Second)},
 			wantErr: true,
 		},
 	}

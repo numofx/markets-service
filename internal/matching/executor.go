@@ -61,11 +61,15 @@ func NewExecutorClient(url string, managerData string) *ExecutorClient {
 }
 
 func (c *ExecutorClient) SubmitMatch(ctx context.Context, candidate orders.MatchCandidate, price string, amount string) (ExecutorResponse, error) {
+	return c.SubmitMatchForMarket(ctx, "BTCUSDC-CVXPERP", candidate, price, amount)
+}
+
+func (c *ExecutorClient) SubmitMatchForMarket(ctx context.Context, market string, candidate orders.MatchCandidate, price string, amount string) (ExecutorResponse, error) {
 	if c.url == "" {
 		return ExecutorResponse{}, fmt.Errorf("EXECUTOR_URL is required")
 	}
 
-	reqBody, err := buildExecutorRequest(candidate, c.managerData, price, amount)
+	reqBody, err := buildExecutorRequest(market, candidate, c.managerData, price, amount)
 	if err != nil {
 		return ExecutorResponse{}, err
 	}
@@ -116,7 +120,7 @@ func (c *ExecutorClient) SubmitMatch(ctx context.Context, candidate orders.Match
 	return executorResp, nil
 }
 
-func buildExecutorRequest(candidate orders.MatchCandidate, managerData string, price string, amount string) (ExecutorRequest, error) {
+func buildExecutorRequest(market string, candidate orders.MatchCandidate, managerData string, price string, amount string) (ExecutorRequest, error) {
 	takerAction, err := normalizeAction(candidate.Taker)
 	if err != nil {
 		return ExecutorRequest{}, fmt.Errorf("parse taker action_json: %w", err)
@@ -127,7 +131,7 @@ func buildExecutorRequest(candidate orders.MatchCandidate, managerData string, p
 	}
 
 	return ExecutorRequest{
-		Market:        "BTC-PERP",
+		Market:        market,
 		AssetAddress:  strings.ToLower(candidate.Taker.AssetAddress),
 		ModuleAddress: extractModuleAddress(takerAction),
 		MakerOrderID:  candidate.Maker.OrderID,

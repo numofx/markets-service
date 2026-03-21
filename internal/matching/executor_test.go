@@ -1,11 +1,11 @@
 package matching
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -15,27 +15,27 @@ import (
 func TestBuildExecutorRequest(t *testing.T) {
 	candidate := orders.MatchCandidate{
 		Taker: orders.Order{
-			OrderID:      "taker-1",
-			OwnerAddress: "0xowner1",
+			OrderID:       "taker-1",
+			OwnerAddress:  "0xowner1",
 			SignerAddress: "0xsigner1",
-			AssetAddress: "0xabc",
-			SubaccountID: "10",
-			ActionJSON:   json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xowner1","signer":"0xsigner1"}`),
-			Signature:    "0xsig1",
-			Nonce:        "1",
+			AssetAddress:  "0xabc",
+			SubaccountID:  "10",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xowner1","signer":"0xsigner1"}`),
+			Signature:     "0xsig1",
+			Nonce:         "1",
 		},
 		Maker: orders.Order{
-			OrderID:      "maker-1",
-			OwnerAddress: "0xowner2",
+			OrderID:       "maker-1",
+			OwnerAddress:  "0xowner2",
 			SignerAddress: "0xsigner2",
-			SubaccountID: "11",
-			ActionJSON:   json.RawMessage(`{"subaccount_id":"11","nonce":"2","module":"0xtrade","data":"0xbbb","expiry":"100","owner":"0xowner2","signer":"0xsigner2"}`),
-			Signature:    "0xsig2",
-			Nonce:        "2",
+			SubaccountID:  "11",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"11","nonce":"2","module":"0xtrade","data":"0xbbb","expiry":"100","owner":"0xowner2","signer":"0xsigner2"}`),
+			Signature:     "0xsig2",
+			Nonce:         "2",
 		},
 	}
 
-	req, err := buildExecutorRequest(candidate, "0xfeed", "75", "3")
+	req, err := buildExecutorRequest("BTCUSDC-CVXPERP", candidate, "0xfeed", "75", "3")
 	if err != nil {
 		t.Fatalf("buildExecutorRequest returned error: %v", err)
 	}
@@ -66,58 +66,59 @@ func TestBuildExecutorRequest(t *testing.T) {
 func TestExecutorClientSubmitMatch(t *testing.T) {
 	candidate := orders.MatchCandidate{
 		Taker: orders.Order{
-			OrderID:      "taker-1",
-			OwnerAddress: "0xowner1",
+			OrderID:       "taker-1",
+			OwnerAddress:  "0xowner1",
 			SignerAddress: "0xsigner1",
-			AssetAddress: "0xabc",
-			SubaccountID: "10",
-			ActionJSON:   json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xowner1","signer":"0xsigner1"}`),
-			Signature:    "0xsig1",
-			Nonce:        "1",
+			AssetAddress:  "0xabc",
+			SubaccountID:  "10",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xowner1","signer":"0xsigner1"}`),
+			Signature:     "0xsig1",
+			Nonce:         "1",
 		},
 		Maker: orders.Order{
-			OrderID:      "maker-1",
-			OwnerAddress: "0xowner2",
+			OrderID:       "maker-1",
+			OwnerAddress:  "0xowner2",
 			SignerAddress: "0xsigner2",
-			SubaccountID: "11",
-			ActionJSON:   json.RawMessage(`{"subaccount_id":"11","nonce":"2","module":"0xtrade","data":"0xbbb","expiry":"100","owner":"0xowner2","signer":"0xsigner2"}`),
-			Signature:    "0xsig2",
-			Nonce:        "2",
+			SubaccountID:  "11",
+			ActionJSON:    json.RawMessage(`{"subaccount_id":"11","nonce":"2","module":"0xtrade","data":"0xbbb","expiry":"100","owner":"0xowner2","signer":"0xsigner2"}`),
+			Signature:     "0xsig2",
+			Nonce:         "2",
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-
-		var req ExecutorRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			t.Fatalf("unmarshal request: %v", err)
-		}
-
-		if req.OrderData.TakerAccount != "10" {
-			t.Fatalf("taker account = %s", req.OrderData.TakerAccount)
-		}
-		if req.OrderData.FillDetails[0].FilledAccount != "11" {
-			t.Fatalf("filled account = %s", req.OrderData.FillDetails[0].FilledAccount)
-		}
-		if req.OrderData.ManagerData != "0xfeed" {
-			t.Fatalf("manager data = %s", req.OrderData.ManagerData)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"accepted":true,"tx_hash":"0xdeadbeef"}`))
-	}))
-	defer server.Close()
-
 	client := &ExecutorClient{
-		url:         server.URL,
+		url:         "https://executor.test/submit",
 		managerData: "0xfeed",
 		httpClient: &http.Client{
 			Timeout: time.Second,
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				defer r.Body.Close()
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read body: %v", err)
+				}
+
+				var req ExecutorRequest
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+
+				if req.OrderData.TakerAccount != "10" {
+					t.Fatalf("taker account = %s", req.OrderData.TakerAccount)
+				}
+				if req.OrderData.FillDetails[0].FilledAccount != "11" {
+					t.Fatalf("filled account = %s", req.OrderData.FillDetails[0].FilledAccount)
+				}
+				if req.OrderData.ManagerData != "0xfeed" {
+					t.Fatalf("manager data = %s", req.OrderData.ManagerData)
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`{"accepted":true,"tx_hash":"0xdeadbeef"}`)),
+				}, nil
+			}),
 		},
 	}
 
@@ -156,7 +157,7 @@ func TestBuildExecutorRequestRejectsActionOwnerMismatch(t *testing.T) {
 		},
 	}
 
-	_, err := buildExecutorRequest(candidate, "0x", "75", "3")
+	_, err := buildExecutorRequest("BTCUSDC-CVXPERP", candidate, "0x", "75", "3")
 	if err == nil || err.Error() != "parse taker action_json: owner mismatch" {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -185,11 +186,17 @@ func TestBuildExecutorRequestDefaultsEmptyManagerData(t *testing.T) {
 		},
 	}
 
-	req, err := buildExecutorRequest(candidate, "", "75", "3")
+	req, err := buildExecutorRequest("BTCUSDC-CVXPERP", candidate, "", "75", "3")
 	if err != nil {
 		t.Fatalf("buildExecutorRequest returned error: %v", err)
 	}
 	if req.OrderData.ManagerData != "0x" {
 		t.Fatalf("manager data = %s", req.OrderData.ManagerData)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

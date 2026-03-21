@@ -20,22 +20,23 @@ const (
 )
 
 type Order struct {
-	OrderID       string
-	OwnerAddress  string
-	SignerAddress string
-	SubaccountID  string
-	RecipientID   string
-	Nonce         string
-	Side          Side
-	AssetAddress  string
-	SubID         string
-	DesiredAmount string
-	FilledAmount  string
-	LimitPrice    string
-	WorstFee      string
-	Expiry        int64
-	ActionJSON    json.RawMessage
-	Signature     string
-	Status        Status
-	CreatedAt     time.Time
+	OrderID         string
+	OwnerAddress    string
+	SignerAddress   string
+	SubaccountID    string
+	RecipientID     string
+	Nonce           string
+	Side            Side
+	AssetAddress    string
+	SubID           string
+	DesiredAmount   string
+	FilledAmount    string
+	LimitPrice      string
+	LimitPriceTicks string `json:"-"`
+	WorstFee        string
+	Expiry          int64
+	ActionJSON      json.RawMessage
+	Signature       string
+	Status          Status
+	CreatedAt       time.Time
 }

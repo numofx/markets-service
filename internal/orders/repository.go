@@ -12,27 +12,31 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/numofx/matching-backend/internal/instruments"
+	"github.com/numofx/matching-backend/internal/pricing"
 )
 
 var ErrNotFound = errors.New("order not found")
 
 type CreateOrderParams struct {
-	OrderID       string
-	OwnerAddress  string
-	SignerAddress string
-	SubaccountID  string
-	RecipientID   string
-	Nonce         string
-	Side          Side
-	AssetAddress  string
-	SubID         string
-	DesiredAmount string
-	FilledAmount  string
-	LimitPrice    string
-	WorstFee      string
-	Expiry        int64
-	ActionJSON    json.RawMessage
-	Signature     string
+	OrderID         string
+	OwnerAddress    string
+	SignerAddress   string
+	SubaccountID    string
+	RecipientID     string
+	Nonce           string
+	Side            Side
+	AssetAddress    string
+	SubID           string
+	DesiredAmount   string
+	FilledAmount    string
+	LimitPrice      string
+	LimitPriceTicks string
+	WorstFee        string
+	Expiry          int64
+	ActionJSON      json.RawMessage
+	Signature       string
 }
 
 type CancelOrderParams struct {
@@ -53,6 +57,63 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+func (r *Repository) BackfillLimitPriceTicks(ctx context.Context, registry *instruments.Registry) error {
+	if registry == nil {
+		return fmt.Errorf("instrument registry is required for limit price backfill")
+	}
+
+	const query = `
+select order_id, asset_address, limit_price
+from active_orders
+where limit_price_ticks is null
+`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return mapPGError(err)
+	}
+	defer rows.Close()
+
+	type missing struct {
+		OrderID      string
+		AssetAddress string
+		LimitPrice   string
+	}
+
+	var updates []missing
+	for rows.Next() {
+		var item missing
+		if err := rows.Scan(&item.OrderID, &item.AssetAddress, &item.LimitPrice); err != nil {
+			return mapPGError(err)
+		}
+		updates = append(updates, item)
+	}
+	if err := rows.Err(); err != nil {
+		return mapPGError(err)
+	}
+
+	for _, item := range updates {
+		instrument, ok := registry.ByAssetAddress(strings.ToLower(item.AssetAddress))
+		if !ok {
+			return fmt.Errorf("missing instrument metadata for asset %s while backfilling order %s", item.AssetAddress, item.OrderID)
+		}
+		converter, err := pricing.NewConverter(instrument)
+		if err != nil {
+			return err
+		}
+		ticks, _, err := converter.Parse(item.LimitPrice)
+		if err != nil {
+			return fmt.Errorf("backfill price ticks for order %s: %w", item.OrderID, err)
+		}
+
+		if _, err := r.pool.Exec(ctx, `update active_orders set limit_price_ticks = $2 where order_id = $1`, item.OrderID, ticks); err != nil {
+			return mapPGError(err)
+		}
+	}
+
+	return nil
+}
+
 func (r *Repository) Create(ctx context.Context, params CreateOrderParams) (Order, error) {
 	const query = `
 insert into active_orders (
@@ -68,16 +129,17 @@ insert into active_orders (
   desired_amount,
   filled_amount,
   limit_price,
+  limit_price_ticks,
   worst_fee,
   expiry,
   action_json,
   signature,
   status
 ) values (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 )
 returning order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
-          desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+          desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
 `
 
 	order := Order{}
@@ -96,6 +158,7 @@ returning order_id, owner_address, signer_address, subaccount_id, recipient_id, 
 		params.DesiredAmount,
 		params.FilledAmount,
 		params.LimitPrice,
+		params.LimitPriceTicks,
 		params.WorstFee,
 		params.Expiry,
 		params.ActionJSON,
@@ -114,6 +177,7 @@ returning order_id, owner_address, signer_address, subaccount_id, recipient_id, 
 		&order.DesiredAmount,
 		&order.FilledAmount,
 		&order.LimitPrice,
+		&order.LimitPriceTicks,
 		&order.WorstFee,
 		&order.Expiry,
 		&order.ActionJSON,
@@ -133,7 +197,7 @@ update active_orders
 set status = $3
 where owner_address = $1 and nonce = $2 and status = 'active'
 returning order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
-          desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+          desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
 `
 
 	order := Order{}
@@ -150,6 +214,7 @@ returning order_id, owner_address, signer_address, subaccount_id, recipient_id, 
 		&order.DesiredAmount,
 		&order.FilledAmount,
 		&order.LimitPrice,
+		&order.LimitPriceTicks,
 		&order.WorstFee,
 		&order.Expiry,
 		&order.ActionJSON,
@@ -294,14 +359,14 @@ func (r *Repository) ExpireOrders(ctx context.Context, now time.Time) error {
 }
 
 func (r *Repository) listBySide(ctx context.Context, assetAddress string, subID string, side Side, limit int32) ([]Order, error) {
-	orderBy := "limit_price desc, created_at asc"
+	orderBy := "limit_price_ticks::numeric desc, created_at asc"
 	if side == SideSell {
-		orderBy = "limit_price asc, created_at asc"
+		orderBy = "limit_price_ticks::numeric asc, created_at asc"
 	}
 
 	query := fmt.Sprintf(`
 select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
-       desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+       desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
 from active_orders
 where asset_address = $1 and sub_id = $2 and side = $3 and status = 'active'
 order by %s
@@ -342,14 +407,14 @@ func (r *Repository) bestBySide(ctx context.Context, assetAddress string, subID 
 }
 
 func lockBestBySide(ctx context.Context, tx pgx.Tx, assetAddress string, subID string, side Side) (*Order, error) {
-	orderBy := "limit_price desc, created_at asc"
+	orderBy := "limit_price_ticks::numeric desc, created_at asc"
 	if side == SideSell {
-		orderBy = "limit_price asc, created_at asc"
+		orderBy = "limit_price_ticks::numeric asc, created_at asc"
 	}
 
 	query := fmt.Sprintf(`
 select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
-       desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+       desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
 from active_orders
 where asset_address = $1 and sub_id = $2 and side = $3 and status = 'active'
 order by %s
@@ -398,7 +463,7 @@ where status = 'active' and expiry <= $1
 func applyFill(ctx context.Context, tx pgx.Tx, orderID string, fillAmount string) error {
 	const selectQuery = `
 select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
-       desired_amount, filled_amount, limit_price, worst_fee, expiry, action_json, signature, status, created_at
+       desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
 from active_orders
 where order_id = $1 and status = 'matching'
 for update
@@ -464,6 +529,7 @@ func scanOrder(row pgx.Row) (Order, error) {
 		&order.DesiredAmount,
 		&order.FilledAmount,
 		&order.LimitPrice,
+		&order.LimitPriceTicks,
 		&order.WorstFee,
 		&order.Expiry,
 		&order.ActionJSON,

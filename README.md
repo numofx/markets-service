@@ -4,20 +4,23 @@ Thin offchain backend for the `matching` contracts.
 
 Initial scope:
 
-- one market: BTC perp
+- one market: BTC convex perp
+- one variance market: BTCVAR30-PERP
 - one order type: limit order
 - one module path: `TradeModule`
 - one executor
-- one database table for active orders
+- one internal Deribit-backed oracle
 - one matching loop
 
 This repo is intentionally narrow. It is not a generic exchange backend.
 
 ## Responsibilities
 
-- accept and persist signed BTC perp orders
+- accept and persist signed BTC convex perp orders
 - expose a minimal API for order entry and book inspection
+- expose a minimal API for BTCVAR30 oracle reads
 - run a price-time matching loop
+- run a BTCVAR30 oracle poller and funding loop
 - submit executor payloads for `Matching.verifyAndMatch(...)`
 
 ## Out of Scope
@@ -39,7 +42,11 @@ internal/
   api/        HTTP server wiring and handlers
   config/     environment configuration
   db/         Postgres connection helpers
+  funding/    BTCVAR30 funding calculation loop
+  instruments/ instrument metadata and registry
+  marketdata/ Deribit market data client
   matching/   matching loop and orchestration
+  oracles/    internal oracle services and persistence
   orders/     order model and repository contracts
 migrations/   database schema
 ```
@@ -62,6 +69,16 @@ Important values:
 - `EXECUTOR_URL`
 - optionally `EXECUTOR_MANAGER_DATA`
 - optionally `EXECUTOR_MANAGER_DATA_FILE`
+- `DERIBIT_BASE_URL`
+- `DERIBIT_WS_URL`
+- `BTCVAR30_ENABLED`
+- `BTCVAR30_PERP_ASSET_ADDRESS`
+- `BTCVAR30_ORACLE_POLL_MS`
+- `BTCVAR30_ORACLE_STALE_MS`
+- `BTCVAR30_FUNDING_INTERVAL_MS`
+- `BTCVAR30_FUNDING_COEFF`
+- `BTCVAR30_FUNDING_CAP`
+- optionally `BTCVAR30_ORACLE_SIGNING_KEY`
 
 If `EXPECTED_ORDER_OWNER` or `EXPECTED_ORDER_SIGNER` are set, the API rejects orders whose declared owner/signer do not match those configured addresses. The API also validates that `action_json.owner`, `action_json.signer`, `action_json.subaccount_id`, and `action_json.nonce` match the stored order fields.
 
@@ -73,11 +90,69 @@ executor call. If the blob is too large for an env var, set `EXECUTOR_MANAGER_DA
 instead. That file may contain either the raw hex string or a JSON object with a
 `manager_data` field.
 
+## BTCVAR30 Oracle
+
+`BTCVAR30` is a first-pass internal oracle sourced from Deribit BTC volatility index data.
+For v1, the backend polls Deribit and derives:
+
+```text
+variance_30d = (vol_30d / 100)^2
+```
+
+The implementation uses Deribit JSON-RPC style market-data methods and keeps the latest
+signed payload in memory while persisting history to Postgres.
+
+Relevant docs:
+
+- [Deribit API docs](https://docs.deribit.com/)
+- [public/get_volatility_index_data](https://docs.deribit.com/api-reference/market-data/public-get_volatility_index_data)
+- [public/get_instruments](https://docs.deribit.com/api-reference/market-data/public-get_instruments)
+- [public/get_order_book](https://docs.deribit.com/api-reference/market-data/public-get_order_book)
+
+Public endpoints:
+
+- `GET /oracle/btcvar30/latest`
+- `GET /oracle/btcvar30/history?limit=100`
+
+Example latest response:
+
+```json
+{
+  "symbol": "BTCVAR30",
+  "source": "deribit",
+  "timestamp": "2026-03-21T09:00:00Z",
+  "vol_30d": 61.25,
+  "variance_30d": 0.37515625,
+  "methodology_version": "deribit-vol-index-v1",
+  "signature": "sha256:...",
+  "stale": false
+}
+```
+
+## BTCVAR30 Funding
+
+`BTCVAR30-PERP` uses the instrument's own conservative mid-price mark and computes funding from:
+
+```text
+funding_rate = clamp((mark_price - oracle_variance_30d) * BTCVAR30_FUNDING_COEFF, -BTCVAR30_FUNDING_CAP, BTCVAR30_FUNDING_CAP)
+```
+
+Safety rules:
+
+- funding pauses if the oracle is stale
+- last known oracle value is preserved when Deribit is unavailable
+- stale oracle status is logged explicitly
+- no last-trade mark is used
+
+Current limitation:
+
+- there is no existing risk engine in this repo, so position caps / leverage caps are not enforced here yet
+
 Expected request body:
 
 ```json
 {
-  "market": "BTC-PERP",
+  "market": "BTCUSDC-CVXPERP",
   "asset_address": "0x...",
   "module_address": "0x...",
   "maker_order_id": "maker-order-id",
@@ -133,14 +208,16 @@ Suggested flow:
 3. Run the API:
 
 ```bash
-go run ./cmd/api
+env $(cat .env.example | xargs) go run ./cmd/api
 ```
 
 4. Run the matcher:
 
 ```bash
-go run ./cmd/matcher
+env $(cat .env.example | xargs) go run ./cmd/matcher
 ```
+
+For a cleaner local env, export the variables from `.env.example` or use your usual dotenv tooling.
 
 ### EOA-Owned Order Submission
 
@@ -169,7 +246,7 @@ A helper script is available at:
 
 It posts a crossed taker/maker pair to `/v1/orders`, but you still need to provide real `TAKER_ACTION_DATA`, `MAKER_ACTION_DATA`, `TAKER_SIGNATURE`, and `MAKER_SIGNATURE` values for the orders to execute successfully through the onchain matcher.
 
-To reproduce the verified Base dry-run path for BTC squared, point the backend at the generated
+To reproduce the verified Base dry-run path for BTC convex perp, point the backend at the generated
 manager data file from the executor repo:
 
 ```dotenv
@@ -185,10 +262,13 @@ instead of hardcoding `0x`.
 
 ## First Milestone
 
-The first milestone is one successful matched BTC perp trade through `TradeModule`:
+The first milestone is one successful matched BTC convex perp trade through `TradeModule`:
 
 1. store two signed crossed orders
 2. match them offchain
 3. produce executor payloads from stored signed actions
 4. send them to the executor
 5. update both orders on success
+
+For a focused architecture note covering the oracle, funding loop, and enablement flow, see
+- [docs/btcvar30.md](/Users/robertleifke/Code/work/matching-backend/docs/btcvar30.md)

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/numofx/matching-backend/internal/config"
+	"github.com/numofx/matching-backend/internal/instruments"
 	"github.com/numofx/matching-backend/internal/orders"
 )
 
@@ -18,6 +19,7 @@ type Engine struct {
 	cfg      config.Config
 	orders   *orders.Repository
 	executor *ExecutorClient
+	registry *instruments.Registry
 }
 
 const reconciliationTimeout = 5 * time.Second
@@ -27,6 +29,7 @@ func NewEngine(cfg config.Config, pool *pgxpool.Pool) *Engine {
 		cfg:      cfg,
 		orders:   orders.NewRepository(pool),
 		executor: NewExecutorClient(cfg.ExecutorURL, cfg.ExecutorManagerData),
+		registry: instruments.DefaultRegistry(cfg),
 	}
 }
 
@@ -41,21 +44,23 @@ func (e *Engine) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			e.tick(ctx)
+			for _, instrument := range e.registry.Enabled() {
+				e.tickInstrument(ctx, instrument)
+			}
 		}
 	}
 }
 
-func (e *Engine) tick(ctx context.Context) {
+func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Metadata) {
 	now := time.Now()
 
-	candidate, err := e.orders.AcquireMatchCandidate(ctx, e.cfg.BTCPerpAssetAddress, "0", now)
+	candidate, err := e.orders.AcquireMatchCandidate(ctx, instrument.AssetAddress, instrument.SubID, now)
 	if err != nil {
-		slog.Error("acquire match candidate", "error", err)
+		slog.Error("acquire match candidate", "market", instrument.Symbol, "error", err)
 		return
 	}
 	if candidate == nil {
-		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "book_not_crossed")
+		slog.Debug("matcher tick", "market", instrument.Symbol, "status", "book_not_crossed")
 		return
 	}
 
@@ -67,37 +72,38 @@ func (e *Engine) tick(ctx context.Context) {
 		reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
 		defer cancel()
 		if err := e.orders.ReleaseMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID); err != nil {
-			slog.Error("release reserved orders", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+			slog.Error("release reserved orders", "market", instrument.Symbol, "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		}
 	}()
 
 	if candidate.Taker.IsExpired(now) || candidate.Maker.IsExpired(now) {
-		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "expired_order_present")
+		slog.Debug("matcher tick", "market", instrument.Symbol, "status", "expired_order_present")
 		return
 	}
 
 	priceCrossed, err := crosses(candidate.Taker, candidate.Maker)
 	if err != nil {
-		slog.Error("compare prices", "error", err)
+		slog.Error("compare prices", "market", instrument.Symbol, "error", err)
 		return
 	}
 	if !priceCrossed {
-		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "book_not_crossed")
+		slog.Debug("matcher tick", "market", instrument.Symbol, "status", "book_not_crossed")
 		return
 	}
 
-	fillPrice := candidate.Maker.LimitPrice
+	fillPrice := candidate.Maker.LimitPriceTicks
+	logPrice := candidate.Maker.LimitPrice
 	fillAmount, err := minDecimalString(remainingAmount(candidate.Taker), remainingAmount(candidate.Maker))
 	if err != nil {
-		slog.Error("compute fill amount", "error", err)
+		slog.Error("compute fill amount", "market", instrument.Symbol, "error", err)
 		return
 	}
 	if fillAmount == "0" {
-		slog.Debug("matcher tick", "market", "BTC-PERP", "status", "zero_fill")
+		slog.Debug("matcher tick", "market", instrument.Symbol, "status", "zero_fill")
 		return
 	}
 
-	executorResp, err := e.executor.SubmitMatch(ctx, *candidate, fillPrice, fillAmount)
+	executorResp, err := e.executor.SubmitMatchForMarket(ctx, instrument.Symbol, *candidate, fillPrice, fillAmount)
 	if err != nil {
 		reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
 		defer cancel()
@@ -105,6 +111,7 @@ func (e *Engine) tick(ctx context.Context) {
 		if shouldFinalizeAfterExecutorError(err) {
 			if finalizeErr := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); finalizeErr != nil {
 				slog.Error("reconcile already-filled match",
+					"market", instrument.Symbol,
 					"taker_order_id", candidate.Taker.OrderID,
 					"maker_order_id", candidate.Maker.OrderID,
 					"executor_error", err,
@@ -115,17 +122,18 @@ func (e *Engine) tick(ctx context.Context) {
 
 			release = false
 			slog.Warn("reconciled match after executor error",
-				"market", "BTC-PERP",
+				"market", instrument.Symbol,
 				"maker_order_id", candidate.Maker.OrderID,
 				"taker_order_id", candidate.Taker.OrderID,
-				"price", fillPrice,
+				"price", logPrice,
+				"price_ticks", fillPrice,
 				"amount", fillAmount,
 				"executor_error", err,
 			)
 			return
 		}
 
-		slog.Error("submit match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+		slog.Error("submit match", "market", instrument.Symbol, "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		_ = e.orders.MarkMatchFailed(reconcileCtx, []string{candidate.Taker.OrderID, candidate.Maker.OrderID}, err.Error())
 		return
 	}
@@ -133,17 +141,18 @@ func (e *Engine) tick(ctx context.Context) {
 	reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
 	defer cancel()
 	if err := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); err != nil {
-		slog.Error("finalize match", "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
+		slog.Error("finalize match", "market", instrument.Symbol, "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		return
 	}
 
 	release = false
 
 	slog.Info("match executed",
-		"market", "BTC-PERP",
+		"market", instrument.Symbol,
 		"maker_order_id", candidate.Maker.OrderID,
 		"taker_order_id", candidate.Taker.OrderID,
-		"price", fillPrice,
+		"price", logPrice,
+		"price_ticks", fillPrice,
 		"amount", fillAmount,
 		"tx_hash", executorResp.TxHash,
 	)
@@ -158,11 +167,11 @@ func remainingAmount(order orders.Order) string {
 }
 
 func crosses(taker orders.Order, maker orders.Order) (bool, error) {
-	takerPrice, ok := new(big.Int).SetString(taker.LimitPrice, 10)
+	takerPrice, ok := new(big.Int).SetString(taker.LimitPriceTicks, 10)
 	if !ok {
 		return false, slogError("invalid taker price")
 	}
-	makerPrice, ok := new(big.Int).SetString(maker.LimitPrice, 10)
+	makerPrice, ok := new(big.Int).SetString(maker.LimitPriceTicks, 10)
 	if !ok {
 		return false, slogError("invalid maker price")
 	}

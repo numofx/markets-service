@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/numofx/matching-backend/internal/config"
+	"github.com/numofx/matching-backend/internal/instruments"
 	"github.com/numofx/matching-backend/internal/orders"
+	"github.com/numofx/matching-backend/internal/pricing"
 )
 
 type createOrderRequest struct {
@@ -86,8 +88,26 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 	}
 
 	assetAddress := strings.ToLower(r.AssetAddress)
-	if strings.ToLower(cfg.BTCPerpAssetAddress) != "" && assetAddress != strings.ToLower(cfg.BTCPerpAssetAddress) {
-		return orders.CreateOrderParams{}, fmt.Errorf("asset_address must match configured BTC perp asset")
+	if !isAllowedAssetAddress(cfg, assetAddress) {
+		return orders.CreateOrderParams{}, fmt.Errorf("asset_address must match a configured instrument")
+	}
+	registry := instruments.DefaultRegistry(cfg)
+	instrument, ok := registry.ByAssetAddress(assetAddress)
+	if !ok {
+		instrument = instruments.Metadata{
+			Symbol:         assetAddress,
+			AssetAddress:   assetAddress,
+			TickSize:       "1",
+			QuotePrecision: 8,
+		}
+	}
+	converter, err := pricing.NewConverter(instrument)
+	if err != nil {
+		return orders.CreateOrderParams{}, err
+	}
+	limitPriceTicks, normalizedPrice, err := converter.Parse(r.LimitPrice)
+	if err != nil {
+		return orders.CreateOrderParams{}, err
 	}
 
 	subID := r.SubID
@@ -105,22 +125,23 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 	}
 
 	return orders.CreateOrderParams{
-		OrderID:       r.OrderID,
-		OwnerAddress:  ownerAddress,
-		SignerAddress: signerAddress,
-		SubaccountID:  r.SubaccountID,
-		RecipientID:   r.RecipientID,
-		Nonce:         r.Nonce,
-		Side:          side,
-		AssetAddress:  assetAddress,
-		SubID:         subID,
-		DesiredAmount: r.DesiredAmount,
-		FilledAmount:  filledAmount,
-		LimitPrice:    r.LimitPrice,
-		WorstFee:      r.WorstFee,
-		Expiry:        r.Expiry,
-		ActionJSON:    r.ActionJSON,
-		Signature:     r.Signature,
+		OrderID:         r.OrderID,
+		OwnerAddress:    ownerAddress,
+		SignerAddress:   signerAddress,
+		SubaccountID:    r.SubaccountID,
+		RecipientID:     r.RecipientID,
+		Nonce:           r.Nonce,
+		Side:            side,
+		AssetAddress:    assetAddress,
+		SubID:           subID,
+		DesiredAmount:   r.DesiredAmount,
+		FilledAmount:    filledAmount,
+		LimitPrice:      normalizedPrice,
+		LimitPriceTicks: limitPriceTicks,
+		WorstFee:        r.WorstFee,
+		Expiry:          r.Expiry,
+		ActionJSON:      r.ActionJSON,
+		Signature:       r.Signature,
 	}, nil
 }
 
@@ -137,6 +158,23 @@ func (r cancelOrderRequest) validate() error {
 		return fmt.Errorf("nonce is required")
 	}
 	return nil
+}
+
+func isAllowedAssetAddress(cfg config.Config, assetAddress string) bool {
+	btcPerpAsset := strings.ToLower(strings.TrimSpace(cfg.BTCPerpAssetAddress))
+	btcVar30Asset := strings.ToLower(strings.TrimSpace(cfg.BTCVar30AssetAddress))
+	if btcPerpAsset == "" && btcVar30Asset == "" {
+		return true
+	}
+
+	switch assetAddress {
+	case btcPerpAsset:
+		return btcPerpAsset != ""
+	case btcVar30Asset:
+		return cfg.BTCVar30Enabled && btcVar30Asset != ""
+	default:
+		return false
+	}
 }
 
 func validateActionJSON(raw json.RawMessage, ownerAddress string, signerAddress string, subaccountID string, nonce string) error {
