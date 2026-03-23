@@ -89,15 +89,21 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 	}
 
 	assetAddress := strings.ToLower(r.AssetAddress)
-	if !isAllowedAssetAddress(cfg, assetAddress) {
+	subID := r.SubID
+	if subID == "" {
+		subID = "0"
+	}
+
+	if !isAllowedInstrument(cfg, assetAddress, subID) {
 		return orders.CreateOrderParams{}, fmt.Errorf("asset_address must match a configured instrument")
 	}
 	registry := instruments.DefaultRegistry(cfg)
-	instrument, ok := registry.ByAssetAddress(assetAddress)
+	instrument, ok := registry.ByAssetAndSubID(assetAddress, subID)
 	if !ok {
 		instrument = instruments.Metadata{
 			Symbol:         assetAddress,
 			AssetAddress:   assetAddress,
+			SubID:          subID,
 			TickSize:       "1",
 			QuotePrecision: 8,
 		}
@@ -114,11 +120,6 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 		if err := validateBTCVar30VariancePrice(normalizedPrice); err != nil {
 			return orders.CreateOrderParams{}, err
 		}
-	}
-
-	subID := r.SubID
-	if subID == "" {
-		subID = "0"
 	}
 
 	filledAmount := r.FilledAmount
@@ -178,21 +179,13 @@ func (r cancelOrderRequest) validate() error {
 	return nil
 }
 
-func isAllowedAssetAddress(cfg config.Config, assetAddress string) bool {
-	btcPerpAsset := strings.ToLower(strings.TrimSpace(cfg.BTCPerpAssetAddress))
-	btcVar30Asset := strings.ToLower(strings.TrimSpace(cfg.BTCVar30AssetAddress))
-	if btcPerpAsset == "" && btcVar30Asset == "" {
+func isAllowedInstrument(cfg config.Config, assetAddress string, subID string) bool {
+	registry := instruments.DefaultRegistry(cfg)
+	if len(registry.Enabled()) == 0 {
 		return true
 	}
-
-	switch assetAddress {
-	case btcPerpAsset:
-		return btcPerpAsset != ""
-	case btcVar30Asset:
-		return cfg.BTCVar30Enabled && btcVar30Asset != ""
-	default:
-		return false
-	}
+	_, ok := registry.ByAssetAndSubID(assetAddress, subID)
+	return ok
 }
 
 func validateActionJSON(raw json.RawMessage, ownerAddress string, signerAddress string, subaccountID string, nonce string) error {

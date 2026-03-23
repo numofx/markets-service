@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,46 +35,57 @@ type Server struct {
 }
 
 type marketPresentation struct {
-	Market           string `json:"market"`
-	PriceSemantics   string `json:"price_semantics,omitempty"`
-	DisplaySemantics string `json:"display_semantics,omitempty"`
-	DisplayName      string `json:"display_name,omitempty"`
-	DisplayLabel     string `json:"display_label,omitempty"`
-	TickSize         string `json:"tick_size,omitempty"`
-	SettlementNote   string `json:"settlement_note,omitempty"`
-	PricingModel     string `json:"pricing_model,omitempty"`
-	DisplayPriceKind string `json:"display_price_kind,omitempty"`
-	AssetAddress     string `json:"asset_address,omitempty"`
-	SubID            string `json:"sub_id,omitempty"`
+	Market             string `json:"market"`
+	ContractType       string `json:"contract_type,omitempty"`
+	SettlementType     string `json:"settlement_type,omitempty"`
+	BaseAssetSymbol    string `json:"base_asset_symbol,omitempty"`
+	QuoteAssetSymbol   string `json:"quote_asset_symbol,omitempty"`
+	ExpiryTimestamp    int64  `json:"expiry_timestamp,omitempty"`
+	LastTradeTimestamp int64  `json:"last_trade_timestamp,omitempty"`
+	PriceSemantics     string `json:"price_semantics,omitempty"`
+	DisplaySemantics   string `json:"display_semantics,omitempty"`
+	DisplayName        string `json:"display_name,omitempty"`
+	DisplayLabel       string `json:"display_label,omitempty"`
+	TickSize           string `json:"tick_size,omitempty"`
+	SettlementNote     string `json:"settlement_note,omitempty"`
+	PricingModel       string `json:"pricing_model,omitempty"`
+	DisplayPriceKind   string `json:"display_price_kind,omitempty"`
+	AssetAddress       string `json:"asset_address,omitempty"`
+	SubID              string `json:"sub_id,omitempty"`
 }
 
 type presentedOrder struct {
-	OrderID         string          `json:"order_id"`
-	OwnerAddress    string          `json:"owner_address"`
-	SignerAddress   string          `json:"signer_address"`
-	SubaccountID    string          `json:"subaccount_id"`
-	RecipientID     string          `json:"recipient_id"`
-	Nonce           string          `json:"nonce"`
-	Side            orders.Side     `json:"side"`
-	AssetAddress    string          `json:"asset_address"`
-	SubID           string          `json:"sub_id"`
-	DesiredAmount   string          `json:"desired_amount"`
-	FilledAmount    string          `json:"filled_amount"`
-	LimitPrice      string          `json:"limit_price"`
-	WorstFee        string          `json:"worst_fee"`
-	Expiry          int64           `json:"expiry"`
-	ActionJSON      json.RawMessage `json:"action_json"`
-	Signature       string          `json:"signature"`
-	Status          orders.Status   `json:"status"`
-	CreatedAt       time.Time       `json:"created_at"`
-	Market          string          `json:"market,omitempty"`
-	VariancePrice   float64         `json:"variance_price,omitempty"`
-	VolPercent      float64         `json:"vol_percent,omitempty"`
-	PriceSemantics  string          `json:"price_semantics,omitempty"`
-	DisplayName     string          `json:"display_name,omitempty"`
-	DisplayLabel    string          `json:"display_label,omitempty"`
-	DisplaySemantic string          `json:"display_semantics,omitempty"`
-	TickSize        string          `json:"tick_size,omitempty"`
+	OrderID          string          `json:"order_id"`
+	OwnerAddress     string          `json:"owner_address"`
+	SignerAddress    string          `json:"signer_address"`
+	SubaccountID     string          `json:"subaccount_id"`
+	RecipientID      string          `json:"recipient_id"`
+	Nonce            string          `json:"nonce"`
+	Side             orders.Side     `json:"side"`
+	AssetAddress     string          `json:"asset_address"`
+	SubID            string          `json:"sub_id"`
+	DesiredAmount    string          `json:"desired_amount"`
+	FilledAmount     string          `json:"filled_amount"`
+	LimitPrice       string          `json:"limit_price"`
+	WorstFee         string          `json:"worst_fee"`
+	Expiry           int64           `json:"expiry"`
+	ActionJSON       json.RawMessage `json:"action_json"`
+	Signature        string          `json:"signature"`
+	Status           orders.Status   `json:"status"`
+	CreatedAt        time.Time       `json:"created_at"`
+	Market           string          `json:"market,omitempty"`
+	ContractType     string          `json:"contract_type,omitempty"`
+	SettlementType   string          `json:"settlement_type,omitempty"`
+	BaseAssetSymbol  string          `json:"base_asset_symbol,omitempty"`
+	QuoteAssetSymbol string          `json:"quote_asset_symbol,omitempty"`
+	ExpiryTimestamp  int64           `json:"expiry_timestamp,omitempty"`
+	VariancePrice    float64         `json:"variance_price,omitempty"`
+	VolPercent       float64         `json:"vol_percent,omitempty"`
+	PriceSemantics   string          `json:"price_semantics,omitempty"`
+	DisplayName      string          `json:"display_name,omitempty"`
+	DisplayLabel     string          `json:"display_label,omitempty"`
+	DisplaySemantic  string          `json:"display_semantics,omitempty"`
+	TickSize         string          `json:"tick_size,omitempty"`
 }
 
 type orderResponse struct {
@@ -126,6 +138,7 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, registry *instruments.Regi
 func (s *Server) Run() error {
 	router := chi.NewRouter()
 	router.Get("/healthz", s.handleHealth)
+	router.Get("/v1/markets", s.handleMarkets)
 	router.Get("/v1/book", s.handleBook)
 	router.Post("/v1/orders", s.handleCreateOrder)
 	router.Post("/v1/orders/cancel", s.handleCancelOrder)
@@ -138,6 +151,25 @@ func (s *Server) Run() error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleMarkets(w http.ResponseWriter, _ *http.Request) {
+	if s.instruments == nil {
+		writeJSON(w, http.StatusOK, []marketPresentation{})
+		return
+	}
+
+	items := s.instruments.Enabled()
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Symbol < items[j].Symbol
+	})
+
+	response := make([]marketPresentation, 0, len(items))
+	for _, item := range items {
+		response = append(response, presentMarket(item))
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleBook(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +217,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	instrument, _ := s.instruments.ByAssetAddress(strings.ToLower(order.AssetAddress))
+	instrument, _ := s.instruments.ByAssetAndSubID(strings.ToLower(order.AssetAddress), order.SubID)
 	writeJSON(w, http.StatusCreated, orderResponse{Order: presentOrder(order, instrument)})
 }
 
@@ -215,7 +247,7 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	instrument, _ := s.instruments.ByAssetAddress(strings.ToLower(order.AssetAddress))
+	instrument, _ := s.instruments.ByAssetAndSubID(strings.ToLower(order.AssetAddress), order.SubID)
 	writeJSON(w, http.StatusOK, orderResponse{Order: presentOrder(order, instrument)})
 }
 
@@ -280,7 +312,11 @@ func (s *Server) resolveMarket(r *http.Request) instruments.Metadata {
 	}
 
 	if assetAddress := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("asset_address"))); assetAddress != "" {
-		if item, ok := s.instruments.ByAssetAddress(assetAddress); ok {
+		subID := strings.TrimSpace(r.URL.Query().Get("sub_id"))
+		if subID == "" {
+			subID = "0"
+		}
+		if item, ok := s.instruments.ByAssetAndSubID(assetAddress, subID); ok {
 			return item
 		}
 	}
@@ -311,30 +347,35 @@ func presentOrders(items []orders.Order, instrument instruments.Metadata) []pres
 
 func presentOrder(order orders.Order, instrument instruments.Metadata) presentedOrder {
 	presented := presentedOrder{
-		OrderID:         order.OrderID,
-		OwnerAddress:    order.OwnerAddress,
-		SignerAddress:   order.SignerAddress,
-		SubaccountID:    order.SubaccountID,
-		RecipientID:     order.RecipientID,
-		Nonce:           order.Nonce,
-		Side:            order.Side,
-		AssetAddress:    order.AssetAddress,
-		SubID:           order.SubID,
-		DesiredAmount:   order.DesiredAmount,
-		FilledAmount:    order.FilledAmount,
-		LimitPrice:      order.LimitPrice,
-		WorstFee:        order.WorstFee,
-		Expiry:          order.Expiry,
-		ActionJSON:      order.ActionJSON,
-		Signature:       order.Signature,
-		Status:          order.Status,
-		CreatedAt:       order.CreatedAt,
-		Market:          instrument.Symbol,
-		PriceSemantics:  instrument.PriceSemantics,
-		DisplayName:     instrument.DisplayName,
-		DisplayLabel:    instrument.DisplayLabel,
-		DisplaySemantic: instrument.DisplaySemantics,
-		TickSize:        instrument.TickSize,
+		OrderID:          order.OrderID,
+		OwnerAddress:     order.OwnerAddress,
+		SignerAddress:    order.SignerAddress,
+		SubaccountID:     order.SubaccountID,
+		RecipientID:      order.RecipientID,
+		Nonce:            order.Nonce,
+		Side:             order.Side,
+		AssetAddress:     order.AssetAddress,
+		SubID:            order.SubID,
+		DesiredAmount:    order.DesiredAmount,
+		FilledAmount:     order.FilledAmount,
+		LimitPrice:       order.LimitPrice,
+		WorstFee:         order.WorstFee,
+		Expiry:           order.Expiry,
+		ActionJSON:       order.ActionJSON,
+		Signature:        order.Signature,
+		Status:           order.Status,
+		CreatedAt:        order.CreatedAt,
+		Market:           instrument.Symbol,
+		ContractType:     instrument.ContractType,
+		SettlementType:   instrument.SettlementType,
+		BaseAssetSymbol:  instrument.BaseAssetSymbol,
+		QuoteAssetSymbol: instrument.QuoteAssetSymbol,
+		ExpiryTimestamp:  instrument.ExpiryTimestamp,
+		PriceSemantics:   instrument.PriceSemantics,
+		DisplayName:      instrument.DisplayName,
+		DisplayLabel:     instrument.DisplayLabel,
+		DisplaySemantic:  instrument.DisplaySemantics,
+		TickSize:         instrument.TickSize,
 	}
 	if instrument.PricingModel != instruments.PricingModelVariance {
 		return presented
@@ -352,17 +393,23 @@ func presentOrder(order orders.Order, instrument instruments.Metadata) presented
 
 func presentMarket(market instruments.Metadata) marketPresentation {
 	return marketPresentation{
-		Market:           market.Symbol,
-		PriceSemantics:   market.PriceSemantics,
-		DisplaySemantics: market.DisplaySemantics,
-		DisplayName:      market.DisplayName,
-		DisplayLabel:     market.DisplayLabel,
-		TickSize:         market.TickSize,
-		SettlementNote:   market.SettlementNote,
-		PricingModel:     market.PricingModel,
-		DisplayPriceKind: market.DisplayPriceKind,
-		AssetAddress:     strings.ToLower(market.AssetAddress),
-		SubID:            market.SubID,
+		Market:             market.Symbol,
+		ContractType:       market.ContractType,
+		SettlementType:     market.SettlementType,
+		BaseAssetSymbol:    market.BaseAssetSymbol,
+		QuoteAssetSymbol:   market.QuoteAssetSymbol,
+		ExpiryTimestamp:    market.ExpiryTimestamp,
+		LastTradeTimestamp: market.LastTradeTimestamp,
+		PriceSemantics:     market.PriceSemantics,
+		DisplaySemantics:   market.DisplaySemantics,
+		DisplayName:        market.DisplayName,
+		DisplayLabel:       market.DisplayLabel,
+		TickSize:           market.TickSize,
+		SettlementNote:     market.SettlementNote,
+		PricingModel:       market.PricingModel,
+		DisplayPriceKind:   market.DisplayPriceKind,
+		AssetAddress:       strings.ToLower(market.AssetAddress),
+		SubID:              market.SubID,
 	}
 }
 

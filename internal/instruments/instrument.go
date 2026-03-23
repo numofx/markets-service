@@ -15,6 +15,12 @@ type Metadata struct {
 	Symbol             string        `json:"symbol"`
 	AssetAddress       string        `json:"asset_address"`
 	SubID              string        `json:"sub_id"`
+	ContractType       string        `json:"contract_type,omitempty"`
+	SettlementType     string        `json:"settlement_type,omitempty"`
+	BaseAssetSymbol    string        `json:"base_asset_symbol,omitempty"`
+	QuoteAssetSymbol   string        `json:"quote_asset_symbol,omitempty"`
+	ExpiryTimestamp    int64         `json:"expiry_timestamp,omitempty"`
+	LastTradeTimestamp int64         `json:"last_trade_timestamp,omitempty"`
 	TickSize           string        `json:"tick_size"`
 	MinSize            string        `json:"min_size"`
 	ContractMultiplier string        `json:"contract_multiplier"`
@@ -31,20 +37,20 @@ type Metadata struct {
 }
 
 type Registry struct {
-	bySymbol       map[string]Metadata
-	byAssetAddress map[string]Metadata
+	bySymbol        map[string]Metadata
+	byAssetAndSubID map[string]Metadata
 }
 
 func NewRegistry(items []Metadata) *Registry {
 	registry := &Registry{
-		bySymbol:       make(map[string]Metadata, len(items)),
-		byAssetAddress: make(map[string]Metadata, len(items)),
+		bySymbol:        make(map[string]Metadata, len(items)),
+		byAssetAndSubID: make(map[string]Metadata, len(items)),
 	}
 
 	for _, item := range items {
 		registry.bySymbol[item.Symbol] = item
-		if item.AssetAddress != "" {
-			registry.byAssetAddress[item.AssetAddress] = item
+		if item.AssetAddress != "" && item.SubID != "" {
+			registry.byAssetAndSubID[assetAndSubIDKey(item.AssetAddress, item.SubID)] = item
 		}
 	}
 
@@ -77,6 +83,18 @@ func (r *Registry) ByAssetAddress(assetAddress string) (Metadata, bool) {
 	if r == nil {
 		return Metadata{}, false
 	}
-	item, ok := r.byAssetAddress[assetAddress]
+	item, ok := r.byAssetAndSubID[assetAndSubIDKey(assetAddress, "0")]
 	return item, ok
+}
+
+func (r *Registry) ByAssetAndSubID(assetAddress, subID string) (Metadata, bool) {
+	if r == nil {
+		return Metadata{}, false
+	}
+	item, ok := r.byAssetAndSubID[assetAndSubIDKey(assetAddress, subID)]
+	return item, ok
+}
+
+func assetAndSubIDKey(assetAddress, subID string) string {
+	return assetAddress + "|" + subID
 }

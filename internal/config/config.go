@@ -10,50 +10,54 @@ import (
 )
 
 type Config struct {
-	AppEnv                     string
-	APIAddr                    string
-	DatabaseURL                string
-	MatcherPollInterval        time.Duration
-	ChainID                    string
-	MatchingAddress            string
-	TradeModuleAddress         string
-	BTCPerpAssetAddress        string
-	ExecutorURL                string
-	ExecutorManagerData        string
-	ExpectedOrderOwner         string
-	ExpectedOrderSigner        string
-	DeribitBaseURL             string
-	DeribitWSURL               string
-	BTCVar30Enabled            bool
-	BTCVar30AssetAddress       string
-	BTCVar30OraclePollInterval time.Duration
-	BTCVar30OracleStaleAfter   time.Duration
-	BTCVar30FundingInterval    time.Duration
-	BTCVar30FundingCoeff       float64
-	BTCVar30FundingCap         float64
-	BTCVar30OracleSigningKey   string
+	AppEnv                        string
+	APIAddr                       string
+	DatabaseURL                   string
+	MatcherPollInterval           time.Duration
+	ChainID                       string
+	MatchingAddress               string
+	TradeModuleAddress            string
+	BTCPerpAssetAddress           string
+	ExecutorURL                   string
+	ExecutorManagerData           string
+	ExpectedOrderOwner            string
+	ExpectedOrderSigner           string
+	DeribitBaseURL                string
+	DeribitWSURL                  string
+	BTCVar30Enabled               bool
+	BTCVar30AssetAddress          string
+	BTCVar30OraclePollInterval    time.Duration
+	BTCVar30OracleStaleAfter      time.Duration
+	BTCVar30FundingInterval       time.Duration
+	BTCVar30FundingCoeff          float64
+	BTCVar30FundingCap            float64
+	BTCVar30OracleSigningKey      string
+	CNGNApr2026FutureAssetAddress string
+	CNGNApr2026FutureSubID        string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:                   getenvDefault("APP_ENV", "dev"),
-		APIAddr:                  getenvDefault("API_ADDR", ":8080"),
-		DatabaseURL:              os.Getenv("DATABASE_URL"),
-		ChainID:                  os.Getenv("CHAIN_ID"),
-		MatchingAddress:          os.Getenv("MATCHING_ADDRESS"),
-		TradeModuleAddress:       os.Getenv("TRADE_MODULE_ADDRESS"),
-		BTCPerpAssetAddress:      os.Getenv("BTC_PERP_ASSET_ADDRESS"),
-		ExecutorURL:              os.Getenv("EXECUTOR_URL"),
-		ExecutorManagerData:      "0x",
-		ExpectedOrderOwner:       os.Getenv("EXPECTED_ORDER_OWNER"),
-		ExpectedOrderSigner:      os.Getenv("EXPECTED_ORDER_SIGNER"),
-		DeribitBaseURL:           getenvDefault("DERIBIT_BASE_URL", "https://test.deribit.com/api/v2"),
-		DeribitWSURL:             getenvDefault("DERIBIT_WS_URL", "wss://test.deribit.com/ws/api/v2"),
-		BTCVar30Enabled:          getenvBool("BTCVAR30_ENABLED", false),
-		BTCVar30AssetAddress:     strings.ToLower(strings.TrimSpace(os.Getenv("BTCVAR30_PERP_ASSET_ADDRESS"))),
-		BTCVar30FundingCoeff:     getenvFloatDefault("BTCVAR30_FUNDING_COEFF", 0.10),
-		BTCVar30FundingCap:       getenvFloatDefault("BTCVAR30_FUNDING_CAP", 0.05),
-		BTCVar30OracleSigningKey: strings.TrimSpace(os.Getenv("BTCVAR30_ORACLE_SIGNING_KEY")),
+		AppEnv:                        getenvDefault("APP_ENV", "dev"),
+		APIAddr:                       getenvDefault("API_ADDR", ":8080"),
+		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		ChainID:                       os.Getenv("CHAIN_ID"),
+		MatchingAddress:               os.Getenv("MATCHING_ADDRESS"),
+		TradeModuleAddress:            os.Getenv("TRADE_MODULE_ADDRESS"),
+		BTCPerpAssetAddress:           os.Getenv("BTC_PERP_ASSET_ADDRESS"),
+		ExecutorURL:                   os.Getenv("EXECUTOR_URL"),
+		ExecutorManagerData:           "0x",
+		ExpectedOrderOwner:            os.Getenv("EXPECTED_ORDER_OWNER"),
+		ExpectedOrderSigner:           os.Getenv("EXPECTED_ORDER_SIGNER"),
+		DeribitBaseURL:                getenvDefault("DERIBIT_BASE_URL", "https://test.deribit.com/api/v2"),
+		DeribitWSURL:                  getenvDefault("DERIBIT_WS_URL", "wss://test.deribit.com/ws/api/v2"),
+		BTCVar30Enabled:               getenvBool("BTCVAR30_ENABLED", false),
+		BTCVar30AssetAddress:          strings.ToLower(strings.TrimSpace(os.Getenv("BTCVAR30_PERP_ASSET_ADDRESS"))),
+		BTCVar30FundingCoeff:          getenvFloatDefault("BTCVAR30_FUNDING_COEFF", 0.10),
+		BTCVar30FundingCap:            getenvFloatDefault("BTCVAR30_FUNDING_CAP", 0.05),
+		BTCVar30OracleSigningKey:      strings.TrimSpace(os.Getenv("BTCVAR30_ORACLE_SIGNING_KEY")),
+		CNGNApr2026FutureAssetAddress: strings.ToLower(strings.TrimSpace(os.Getenv("CNGN_APR30_2026_FUTURE_ASSET_ADDRESS"))),
+		CNGNApr2026FutureSubID:        strings.TrimSpace(os.Getenv("CNGN_APR30_2026_FUTURE_SUB_ID")),
 	}
 
 	managerData, err := loadExecutorManagerData()

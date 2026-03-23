@@ -10,6 +10,7 @@ import (
 
 const (
 	BTCConvexPerpSymbol = "BTCUSDC-CVXPERP"
+	CNGNApr2026Symbol   = "USDC/cNGN-APR30-2026"
 )
 
 func DefaultRegistry(cfg config.Config) *Registry {
@@ -47,6 +48,29 @@ func DefaultRegistry(cfg config.Config) *Registry {
 			SettlementNote:     btcvar30.SettlementNote,
 			FundingInterval:    cfg.BTCVar30FundingInterval,
 			Enabled:            cfg.BTCVar30Enabled,
+		},
+		{
+			Symbol:             CNGNApr2026Symbol,
+			AssetAddress:       strings.ToLower(strings.TrimSpace(cfg.CNGNApr2026FutureAssetAddress)),
+			SubID:              strings.TrimSpace(cfg.CNGNApr2026FutureSubID),
+			ContractType:       "deliverable_fx_future",
+			SettlementType:     "physical_delivery",
+			BaseAssetSymbol:    "USDC",
+			QuoteAssetSymbol:   "cNGN",
+			ExpiryTimestamp:    1777507200,
+			LastTradeTimestamp: 1777420800,
+			TickSize:           "1",
+			MinSize:            "0.001",
+			ContractMultiplier: "10000",
+			QuotePrecision:     6,
+			PricingModel:       PricingModelLinear,
+			PriceSemantics:     PricingModelLinear,
+			DisplayPriceKind:   DisplayPriceDirect,
+			DisplaySemantics:   DisplayPriceDirect,
+			DisplayLabel:       "cNGN per USDC",
+			DisplayName:        "USDC/cNGN APR-30-2026 Future",
+			SettlementNote:     "Physically delivered on Base. Long pays cNGN and receives fixed USDC notional; short pays fixed USDC notional and receives cNGN.",
+			Enabled:            strings.TrimSpace(cfg.CNGNApr2026FutureAssetAddress) != "" && strings.TrimSpace(cfg.CNGNApr2026FutureSubID) != "",
 		},
 	}
 

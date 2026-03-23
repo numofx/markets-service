@@ -66,6 +66,8 @@ Important values:
 - `MATCHING_ADDRESS`
 - `TRADE_MODULE_ADDRESS`
 - `BTC_PERP_ASSET_ADDRESS`
+- `CNGN_APR30_2026_FUTURE_ASSET_ADDRESS`
+- `CNGN_APR30_2026_FUTURE_SUB_ID`
 - optionally `EXPECTED_ORDER_OWNER`
 - optionally `EXPECTED_ORDER_SIGNER`
 - `EXECUTOR_URL`
@@ -81,6 +83,15 @@ Important values:
 - `BTCVAR30_FUNDING_COEFF`
 - `BTCVAR30_FUNDING_CAP`
 - optionally `BTCVAR30_ORACLE_SIGNING_KEY`
+
+For the physically delivered `USDC/cNGN APR-30-2026` future, the market is only enabled when both
+`CNGN_APR30_2026_FUTURE_ASSET_ADDRESS` and `CNGN_APR30_2026_FUTURE_SUB_ID` are set. The registry
+resolves this instrument by exact `(asset_address, sub_id)` and exposes:
+
+- `contract_type=deliverable_fx_future`
+- `settlement_type=physical_delivery`
+- `base_asset_symbol=USDC`
+- `quote_asset_symbol=cNGN`
 
 If `EXPECTED_ORDER_OWNER` or `EXPECTED_ORDER_SIGNER` are set, the API rejects orders whose declared owner/signer do not match those configured addresses. The API also validates that `action_json.owner`, `action_json.signer`, `action_json.subaccount_id`, and `action_json.nonce` match the stored order fields.
 
