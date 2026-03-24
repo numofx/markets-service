@@ -98,6 +98,36 @@ type bookResponse struct {
 	Asks               []presentedOrder   `json:"asks"`
 }
 
+type presentedTrade struct {
+	TradeID        int64       `json:"trade_id"`
+	AssetAddress   string      `json:"asset_address"`
+	SubID          string      `json:"sub_id"`
+	Price          string      `json:"price"`
+	Size           string      `json:"size"`
+	AggressorSide  orders.Side `json:"aggressor_side"`
+	TakerOrderID   string      `json:"taker_order_id,omitempty"`
+	MakerOrderID   string      `json:"maker_order_id,omitempty"`
+	CreatedAt      time.Time   `json:"created_at"`
+	Market         string      `json:"market,omitempty"`
+	ContractType   string      `json:"contract_type,omitempty"`
+	SettlementType string      `json:"settlement_type,omitempty"`
+}
+
+type presentedTradeStats struct {
+	Change string `json:"change,omitempty"`
+	High   string `json:"high,omitempty"`
+	Last   string `json:"last,omitempty"`
+	Low    string `json:"low,omitempty"`
+	Volume string `json:"volume,omitempty"`
+}
+
+type tradesResponse struct {
+	MarketPresentation marketPresentation  `json:"market_presentation"`
+	Stats              presentedTradeStats `json:"stats_24h"`
+	Trades             []presentedTrade    `json:"trades"`
+	NextBeforeTradeID  int64               `json:"next_before_trade_id,omitempty"`
+}
+
 type oraclePayloadResponse struct {
 	Symbol             string    `json:"symbol"`
 	Market             string    `json:"market"`
@@ -140,6 +170,7 @@ func (s *Server) Run() error {
 	router.Get("/healthz", s.handleHealth)
 	router.Get("/v1/markets", s.handleMarkets)
 	router.Get("/v1/book", s.handleBook)
+	router.Get("/v1/trades", s.handleTrades)
 	router.Post("/v1/orders", s.handleCreateOrder)
 	router.Post("/v1/orders/cancel", s.handleCancelOrder)
 	router.Get("/oracle/btcvar30/latest", s.handleBTCVar30Latest)
@@ -190,6 +221,58 @@ func (s *Server) handleBook(w http.ResponseWriter, r *http.Request) {
 		MarketPresentation: presentMarket(market),
 		Bids:               presentOrders(bids, market),
 		Asks:               presentOrders(asks, market),
+	})
+}
+
+func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
+	market := s.resolveMarket(r)
+	if market.AssetAddress == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown market"})
+		return
+	}
+
+	limit := int32(50)
+	beforeTradeID := int64(0)
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 100"})
+			return
+		}
+		limit = int32(parsed)
+	}
+	if rawBefore := strings.TrimSpace(r.URL.Query().Get("before_trade_id")); rawBefore != "" {
+		parsed, err := strconv.ParseInt(rawBefore, 10, 64)
+		if err != nil || parsed <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "before_trade_id must be a positive integer"})
+			return
+		}
+		beforeTradeID = parsed
+	}
+
+	items, err := s.orders.ListTrades(r.Context(), strings.ToLower(market.AssetAddress), market.SubID, beforeTradeID, limit)
+	if err != nil {
+		slog.Error("list trades", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load trades"})
+		return
+	}
+	stats, err := s.orders.GetTradeStats24h(r.Context(), strings.ToLower(market.AssetAddress), market.SubID)
+	if err != nil {
+		slog.Error("trade stats", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load trades"})
+		return
+	}
+
+	nextBeforeTradeID := int64(0)
+	if len(items) == int(limit) {
+		nextBeforeTradeID = items[len(items)-1].TradeID
+	}
+
+	writeJSON(w, http.StatusOK, tradesResponse{
+		MarketPresentation: presentMarket(market),
+		Stats:              presentTradeStats(stats),
+		Trades:             presentTrades(items, market),
+		NextBeforeTradeID:  nextBeforeTradeID,
 	})
 }
 
@@ -343,6 +426,41 @@ func presentOrders(items []orders.Order, instrument instruments.Metadata) []pres
 		presented = append(presented, presentOrder(item, instrument))
 	}
 	return presented
+}
+
+func presentTrades(items []orders.TradeFill, instrument instruments.Metadata) []presentedTrade {
+	if len(items) == 0 {
+		return nil
+	}
+
+	presented := make([]presentedTrade, 0, len(items))
+	for _, item := range items {
+		presented = append(presented, presentedTrade{
+			TradeID:        item.TradeID,
+			AssetAddress:   strings.ToLower(item.AssetAddress),
+			SubID:          item.SubID,
+			Price:          item.Price,
+			Size:           item.Size,
+			AggressorSide:  item.AggressorSide,
+			TakerOrderID:   item.TakerOrderID,
+			MakerOrderID:   item.MakerOrderID,
+			CreatedAt:      item.CreatedAt,
+			Market:         instrument.Symbol,
+			ContractType:   instrument.ContractType,
+			SettlementType: instrument.SettlementType,
+		})
+	}
+	return presented
+}
+
+func presentTradeStats(stats orders.TradeStats24h) presentedTradeStats {
+	return presentedTradeStats{
+		Change: stats.Change,
+		High:   stats.High,
+		Last:   stats.Last,
+		Low:    stats.Low,
+		Volume: stats.Volume,
+	}
 }
 
 func presentOrder(order orders.Order, instrument instruments.Metadata) presentedOrder {

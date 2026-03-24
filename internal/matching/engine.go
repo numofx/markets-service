@@ -117,7 +117,7 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 		defer cancel()
 
 		if shouldFinalizeAfterExecutorError(err) {
-			if finalizeErr := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); finalizeErr != nil {
+			if finalizeErr := e.orders.FinalizeMatchWithPrice(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, logPrice, fillAmount); finalizeErr != nil {
 				slog.Error("reconcile already-filled match",
 					"market", instrument.Symbol,
 					"taker_order_id", candidate.Taker.OrderID,
@@ -150,7 +150,7 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 
 	reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
 	defer cancel()
-	if err := e.orders.FinalizeMatch(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, fillAmount); err != nil {
+	if err := e.orders.FinalizeMatchWithPrice(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, logPrice, fillAmount); err != nil {
 		slog.Error("finalize match", "market", instrument.Symbol, "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		return
 	}

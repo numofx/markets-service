@@ -324,6 +324,16 @@ func (r *Repository) MarkMatchFailed(ctx context.Context, orderIDs []string, rea
 }
 
 func (r *Repository) FinalizeMatch(ctx context.Context, takerOrderID string, makerOrderID string, fillAmount string) error {
+	return r.FinalizeMatchWithPrice(ctx, takerOrderID, makerOrderID, "", fillAmount)
+}
+
+func (r *Repository) FinalizeMatchWithPrice(
+	ctx context.Context,
+	takerOrderID string,
+	makerOrderID string,
+	fillPrice string,
+	fillAmount string,
+) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
@@ -332,10 +342,18 @@ func (r *Repository) FinalizeMatch(ctx context.Context, takerOrderID string, mak
 		_ = tx.Rollback(ctx)
 	}()
 
-	if err := applyFill(ctx, tx, takerOrderID, fillAmount); err != nil {
+	takerOrder, err := applyFill(ctx, tx, takerOrderID, fillAmount)
+	if err != nil {
 		return err
 	}
-	if err := applyFill(ctx, tx, makerOrderID, fillAmount); err != nil {
+	makerOrder, err := applyFill(ctx, tx, makerOrderID, fillAmount)
+	if err != nil {
+		return err
+	}
+	if fillPrice == "" {
+		fillPrice = makerOrder.LimitPrice
+	}
+	if err := insertTradeFill(ctx, tx, takerOrder, makerOrder, fillPrice, fillAmount); err != nil {
 		return err
 	}
 
@@ -393,6 +411,85 @@ limit $4
 	}
 
 	return results, nil
+}
+
+func (r *Repository) ListTrades(ctx context.Context, assetAddress string, subID string, beforeTradeID int64, limit int32) ([]TradeFill, error) {
+	query := `
+select trade_id, asset_address, sub_id, price, size, aggressor_side, taker_order_id, maker_order_id, created_at
+from trade_fills
+where asset_address = $1 and sub_id = $2
+  and ($3 = 0 or trade_id < $3)
+order by created_at desc, trade_id desc
+limit $4
+`
+
+	rows, err := r.pool.Query(ctx, query, strings.ToLower(assetAddress), subID, beforeTradeID, limit)
+	if err != nil {
+		return nil, mapPGError(err)
+	}
+	defer rows.Close()
+
+	var results []TradeFill
+	for rows.Next() {
+		var item TradeFill
+		if err := rows.Scan(
+			&item.TradeID,
+			&item.AssetAddress,
+			&item.SubID,
+			&item.Price,
+			&item.Size,
+			&item.AggressorSide,
+			&item.TakerOrderID,
+			&item.MakerOrderID,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, mapPGError(err)
+		}
+		results = append(results, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, mapPGError(err)
+	}
+
+	return results, nil
+}
+
+func (r *Repository) GetTradeStats24h(ctx context.Context, assetAddress string, subID string) (TradeStats24h, error) {
+	const query = `
+with recent as (
+  select trade_id, price::numeric as price, size::numeric as size, created_at
+  from trade_fills
+  where asset_address = $1 and sub_id = $2 and created_at >= now() - interval '24 hours'
+),
+latest as (
+  select price from recent order by created_at desc, trade_id desc limit 1
+),
+earliest as (
+  select price from recent order by created_at asc, trade_id asc limit 1
+)
+select
+  coalesce((select price::text from latest), ''),
+  coalesce((select max(price)::text from recent), ''),
+  coalesce((select min(price)::text from recent), ''),
+  coalesce((select sum(size)::text from recent), ''),
+  coalesce((
+    select ((select price from latest) - (select price from earliest))::text
+  ), '')
+`
+
+	var stats TradeStats24h
+	err := r.pool.QueryRow(ctx, query, strings.ToLower(assetAddress), subID).Scan(
+		&stats.Last,
+		&stats.High,
+		&stats.Low,
+		&stats.Volume,
+		&stats.Change,
+	)
+	if err != nil {
+		return TradeStats24h{}, mapPGError(err)
+	}
+	return stats, nil
 }
 
 func (r *Repository) bestBySide(ctx context.Context, assetAddress string, subID string, side Side) (*Order, error) {
@@ -460,7 +557,7 @@ where status = 'active' and expiry <= $1
 	return mapPGError(err)
 }
 
-func applyFill(ctx context.Context, tx pgx.Tx, orderID string, fillAmount string) error {
+func applyFill(ctx context.Context, tx pgx.Tx, orderID string, fillAmount string) (Order, error) {
 	const selectQuery = `
 select order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
        desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status, created_at
@@ -471,22 +568,22 @@ for update
 
 	order, err := scanOrder(tx.QueryRow(ctx, selectQuery, orderID))
 	if err != nil {
-		return err
+		return Order{}, err
 	}
 
 	newFilledAmount, err := addDecimalString(order.FilledAmount, fillAmount)
 	if err != nil {
-		return err
+		return Order{}, err
 	}
 
 	status := StatusActive
 	cmp, err := compareDecimalStrings(newFilledAmount, order.DesiredAmount)
 	if err != nil {
-		return err
+		return Order{}, err
 	}
 	switch {
 	case cmp > 0:
-		return fmt.Errorf("fill amount exceeds desired amount for order %s", order.OrderID)
+		return Order{}, fmt.Errorf("fill amount exceeds desired amount for order %s", order.OrderID)
 	case cmp == 0:
 		status = StatusFilled
 	}
@@ -498,6 +595,38 @@ where order_id = $1
 `
 
 	_, err = tx.Exec(ctx, updateQuery, orderID, newFilledAmount, status)
+	if err != nil {
+		return Order{}, mapPGError(err)
+	}
+	order.FilledAmount = newFilledAmount
+	order.Status = status
+	return order, nil
+}
+
+func insertTradeFill(ctx context.Context, tx pgx.Tx, taker Order, maker Order, price string, size string) error {
+	const query = `
+insert into trade_fills (
+  asset_address,
+  sub_id,
+  price,
+  size,
+  aggressor_side,
+  taker_order_id,
+  maker_order_id
+) values ($1, $2, $3, $4, $5, $6, $7)
+`
+
+	_, err := tx.Exec(
+		ctx,
+		query,
+		strings.ToLower(taker.AssetAddress),
+		taker.SubID,
+		price,
+		size,
+		taker.Side,
+		taker.OrderID,
+		maker.OrderID,
+	)
 	return mapPGError(err)
 }
 
