@@ -131,3 +131,47 @@ returning trade_id
 		t.Fatalf("unexpected page: %+v", page)
 	}
 }
+
+func TestFinalizeMatchWithPriceWritesAtomicFillTradeRow(t *testing.T) {
+	pool := openTestPool(t)
+	repo := NewRepository(pool)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("it-atomic-fill-%d", time.Now().UnixNano())
+
+	takerID := suffix + "-taker"
+	makerID := suffix + "-maker"
+	assetAddress := "0xfeed0000000000000000000000000000000000cc"
+	subID := "1777507200"
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "delete from trade_fills where taker_order_id = $1 or maker_order_id = $2", takerID, makerID)
+		_, _ = pool.Exec(ctx, "delete from active_orders where order_id = $1 or order_id = $2", takerID, makerID)
+	})
+
+	insertOrder := `
+insert into active_orders (
+  order_id, owner_address, signer_address, subaccount_id, recipient_id, nonce, side, asset_address, sub_id,
+  desired_amount, filled_amount, limit_price, limit_price_ticks, worst_fee, expiry, action_json, signature, status
+) values ($1, $2, $3, 1, 1, $4, $5, $6, $7, '1', '0', $8, $9, '0', $10, '{}'::jsonb, '0xsig', 'matching')
+`
+
+	expiry := time.Now().Add(time.Hour).Unix()
+	if _, err := pool.Exec(ctx, insertOrder, takerID, "0xowner", "0xsigner", "1", SideBuy, assetAddress, subID, "1391", "1391", expiry); err != nil {
+		t.Fatalf("insert taker: %v", err)
+	}
+	if _, err := pool.Exec(ctx, insertOrder, makerID, "0xowner", "0xsigner", "2", SideSell, assetAddress, subID, "1390", "1390", expiry); err != nil {
+		t.Fatalf("insert maker: %v", err)
+	}
+
+	if err := repo.FinalizeMatchWithPrice(ctx, takerID, makerID, "1390", "1"); err != nil {
+		t.Fatalf("finalize match: %v", err)
+	}
+
+	var size string
+	if err := pool.QueryRow(ctx, "select size from trade_fills where taker_order_id = $1 and maker_order_id = $2", takerID, makerID).Scan(&size); err != nil {
+		t.Fatalf("load fill row: %v", err)
+	}
+	if size != "1" {
+		t.Fatalf("fill size = %s", size)
+	}
+}

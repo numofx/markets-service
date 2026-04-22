@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -139,6 +140,21 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 	if filledAmount == "" {
 		filledAmount = "0"
 	}
+	normalizedDesiredAmount, err := normalizeDesiredAmount(instrument, r.DesiredAmount)
+	if err != nil {
+		return orders.CreateOrderParams{}, err
+	}
+	normalizedFilledAmount, err := normalizeFilledAmount(instrument, filledAmount)
+	if err != nil {
+		return orders.CreateOrderParams{}, err
+	}
+	filledCmpDesired, err := compareIntegerStrings(normalizedFilledAmount, normalizedDesiredAmount)
+	if err != nil {
+		return orders.CreateOrderParams{}, err
+	}
+	if filledCmpDesired > 0 {
+		return orders.CreateOrderParams{}, fmt.Errorf("filled_amount cannot exceed desired_amount")
+	}
 
 	if err := validateActionJSON(r.ActionJSON, ownerAddress, signerAddress, r.SubaccountID, r.Nonce); err != nil {
 		return orders.CreateOrderParams{}, err
@@ -154,8 +170,8 @@ func (r createOrderRequest) toParams(cfg config.Config) (orders.CreateOrderParam
 		Side:            side,
 		AssetAddress:    assetAddress,
 		SubID:           subID,
-		DesiredAmount:   r.DesiredAmount,
-		FilledAmount:    filledAmount,
+		DesiredAmount:   normalizedDesiredAmount,
+		FilledAmount:    normalizedFilledAmount,
 		LimitPrice:      normalizedPrice,
 		LimitPriceTicks: limitPriceTicks,
 		WorstFee:        r.WorstFee,
@@ -175,6 +191,68 @@ func validateBTCVar30VariancePrice(price string) error {
 		return fmt.Errorf("BTCVAR30 prices are variance, not volatility. Example: 0.25 = 50%% vol")
 	}
 	return nil
+}
+
+func normalizeDesiredAmount(instrument instruments.Metadata, raw string) (string, error) {
+	return normalizeAmountToAtomicUnits("desired_amount", instrument, raw, true)
+}
+
+func normalizeFilledAmount(instrument instruments.Metadata, raw string) (string, error) {
+	return normalizeAmountToAtomicUnits("filled_amount", instrument, raw, false)
+}
+
+func normalizeAmountToAtomicUnits(field string, instrument instruments.Metadata, raw string, requirePositive bool) (string, error) {
+	value, err := parseDecimal(raw)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", field, err)
+	}
+
+	stepRaw := amountAtomicStep(instrument)
+	step, err := parseDecimal(stepRaw)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount step %q for market %s", stepRaw, instrument.Symbol)
+	}
+	if step.Sign() <= 0 {
+		return "", fmt.Errorf("invalid amount step %q for market %s", stepRaw, instrument.Symbol)
+	}
+
+	atomicRat := new(big.Rat).Quo(value, step)
+	if !atomicRat.IsInt() {
+		return "", fmt.Errorf("%s must align to amount step %s", field, normalizeDecimalString(stepRaw))
+	}
+
+	atomic := new(big.Int).Set(atomicRat.Num())
+	if requirePositive {
+		if atomic.Sign() == 0 {
+			return "", fmt.Errorf("normalized atomic size is 0")
+		}
+		if atomic.Sign() < 0 {
+			return "", fmt.Errorf("desired_amount must be greater than zero")
+		}
+	} else if atomic.Sign() < 0 {
+		return "", fmt.Errorf("filled_amount cannot be negative")
+	}
+
+	return atomic.String(), nil
+}
+
+func amountAtomicStep(instrument instruments.Metadata) string {
+	if instrument.Symbol == instruments.CNGNApr2026Symbol {
+		return instrument.MinSize
+	}
+	return "1"
+}
+
+func compareIntegerStrings(a string, b string) (int, error) {
+	left, ok := new(big.Int).SetString(strings.TrimSpace(a), 10)
+	if !ok {
+		return 0, fmt.Errorf("invalid integer value %q", a)
+	}
+	right, ok := new(big.Int).SetString(strings.TrimSpace(b), 10)
+	if !ok {
+		return 0, fmt.Errorf("invalid integer value %q", b)
+	}
+	return left.Cmp(right), nil
 }
 
 type cancelOrderRequest struct {

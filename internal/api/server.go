@@ -347,6 +347,19 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info(
+		"order_submit_trace",
+		"order_id", order.OrderID,
+		"asset_address", strings.ToLower(order.AssetAddress),
+		"sub_id", order.SubID,
+		"side", order.Side,
+		"desired_amount", order.DesiredAmount,
+		"filled_amount", order.FilledAmount,
+		"limit_price", order.LimitPrice,
+		"limit_price_ticks", order.LimitPriceTicks,
+		"status", order.Status,
+	)
+
 	instrument, _ := s.instruments.ByAssetAndSubID(strings.ToLower(order.AssetAddress), order.SubID)
 	writeJSON(w, http.StatusCreated, orderResponse{Order: presentOrder(order, instrument)})
 }

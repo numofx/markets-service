@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"time"
@@ -69,8 +70,8 @@ func (r *Repository) BackfillLimitPriceTicks(ctx context.Context, registry *inst
 		return fmt.Errorf("instrument registry is required for limit price backfill")
 	}
 
-	const query = `
-select order_id, asset_address, limit_price
+const query = `
+select order_id, asset_address, sub_id, limit_price
 from active_orders
 where limit_price_ticks is null
 `
@@ -84,13 +85,14 @@ where limit_price_ticks is null
 	type missing struct {
 		OrderID      string
 		AssetAddress string
+		SubID        string
 		LimitPrice   string
 	}
 
 	var updates []missing
 	for rows.Next() {
 		var item missing
-		if err := rows.Scan(&item.OrderID, &item.AssetAddress, &item.LimitPrice); err != nil {
+		if err := rows.Scan(&item.OrderID, &item.AssetAddress, &item.SubID, &item.LimitPrice); err != nil {
 			return mapPGError(err)
 		}
 		updates = append(updates, item)
@@ -100,9 +102,14 @@ where limit_price_ticks is null
 	}
 
 	for _, item := range updates {
-		instrument, ok := registry.ByAssetAddress(strings.ToLower(item.AssetAddress))
+		instrument, ok := registry.ByAssetAndSubID(strings.ToLower(item.AssetAddress), item.SubID)
 		if !ok {
-			return fmt.Errorf("missing instrument metadata for asset %s while backfilling order %s", item.AssetAddress, item.OrderID)
+			return fmt.Errorf(
+				"missing instrument metadata for asset %s and sub_id %s while backfilling order %s",
+				item.AssetAddress,
+				item.SubID,
+				item.OrderID,
+			)
 		}
 		converter, err := pricing.NewConverter(instrument)
 		if err != nil {
@@ -272,6 +279,12 @@ func (r *Repository) BestBidAndAsk(ctx context.Context, assetAddress string, sub
 }
 
 func (r *Repository) AcquireMatchCandidate(ctx context.Context, assetAddress string, subID string, now time.Time) (*MatchCandidate, error) {
+	slog.Info(
+		"acquire_match_candidate_start",
+		"asset_address", strings.ToLower(assetAddress),
+		"sub_id", subID,
+	)
+
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err
@@ -293,6 +306,13 @@ func (r *Repository) AcquireMatchCandidate(ctx context.Context, assetAddress str
 		return nil, err
 	}
 	if bid == nil || ask == nil {
+		slog.Info(
+			"acquire_match_candidate_no_pair",
+			"asset_address", strings.ToLower(assetAddress),
+			"sub_id", subID,
+			"has_bid", bid != nil,
+			"has_ask", ask != nil,
+		)
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
@@ -307,6 +327,18 @@ func (r *Repository) AcquireMatchCandidate(ctx context.Context, assetAddress str
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+
+	slog.Info(
+		"acquire_match_candidate_reserved",
+		"asset_address", strings.ToLower(assetAddress),
+		"sub_id", subID,
+		"taker_order_id", taker.OrderID,
+		"taker_side", taker.Side,
+		"taker_price_ticks", taker.LimitPriceTicks,
+		"maker_order_id", maker.OrderID,
+		"maker_side", maker.Side,
+		"maker_price_ticks", maker.LimitPriceTicks,
+	)
 
 	return &MatchCandidate{Taker: taker, Maker: maker}, nil
 }
@@ -504,12 +536,12 @@ func (r *Repository) GetMarketDiagnostics(ctx context.Context, assetAddress stri
 with bid_counts as (
   select count(*)::int4 as count
   from active_orders
-  where asset_address = $1 and sub_id = $2 and side = 'buy' and status = 'active'
+  where asset_address = $1 and sub_id = $2 and side = 'buy' and status in ('active', 'matching')
 ),
 ask_counts as (
   select count(*)::int4 as count
   from active_orders
-  where asset_address = $1 and sub_id = $2 and side = 'sell' and status = 'active'
+  where asset_address = $1 and sub_id = $2 and side = 'sell' and status in ('active', 'matching')
 ),
 trade_stats as (
   select count(*)::int8 as count, max(created_at) as last_trade_at
@@ -549,6 +581,13 @@ func (r *Repository) bestBySide(ctx context.Context, assetAddress string, subID 
 }
 
 func lockBestBySide(ctx context.Context, tx pgx.Tx, assetAddress string, subID string, side Side) (*Order, error) {
+	slog.Info(
+		"lock_best_by_side_start",
+		"asset_address", strings.ToLower(assetAddress),
+		"sub_id", subID,
+		"side", side,
+	)
+
 	orderBy := "limit_price_ticks::numeric desc, created_at asc"
 	if side == SideSell {
 		orderBy = "limit_price_ticks::numeric asc, created_at asc"
@@ -567,10 +606,28 @@ for update skip locked
 	order, err := scanOrder(tx.QueryRow(ctx, query, assetAddress, subID, side))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
+			slog.Info(
+				"lock_best_by_side_empty",
+				"asset_address", strings.ToLower(assetAddress),
+				"sub_id", subID,
+				"side", side,
+			)
 			return nil, nil
 		}
 		return nil, err
 	}
+
+	slog.Info(
+		"lock_best_by_side_hit",
+		"asset_address", strings.ToLower(assetAddress),
+		"sub_id", subID,
+		"side", side,
+		"order_id", order.OrderID,
+		"order_status", order.Status,
+		"price_ticks", order.LimitPriceTicks,
+		"desired_amount", order.DesiredAmount,
+		"filled_amount", order.FilledAmount,
+	)
 	return &order, nil
 }
 

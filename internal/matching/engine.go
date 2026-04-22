@@ -65,6 +65,19 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 		return
 	}
 
+	slog.Info(
+		"match_trace_candidate",
+		"market", instrument.Symbol,
+		"asset_address", strings.ToLower(instrument.AssetAddress),
+		"sub_id", instrument.SubID,
+		"taker_order_id", candidate.Taker.OrderID,
+		"taker_side", candidate.Taker.Side,
+		"taker_price_ticks", candidate.Taker.LimitPriceTicks,
+		"maker_order_id", candidate.Maker.OrderID,
+		"maker_side", candidate.Maker.Side,
+		"maker_price_ticks", candidate.Maker.LimitPriceTicks,
+	)
+
 	release := true
 	defer func() {
 		if !release {
@@ -92,6 +105,15 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 		return
 	}
 
+	slog.Info(
+		"match_trace_crossed",
+		"market", instrument.Symbol,
+		"asset_address", strings.ToLower(instrument.AssetAddress),
+		"sub_id", instrument.SubID,
+		"taker_order_id", candidate.Taker.OrderID,
+		"maker_order_id", candidate.Maker.OrderID,
+	)
+
 	fillPrice := candidate.Maker.LimitPriceTicks
 	logPrice := candidate.Maker.LimitPrice
 	logVolPercent := 0.0
@@ -107,10 +129,31 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 		return
 	}
 	if fillAmount == "0" {
-		slog.Debug("matcher tick", "market", instrument.Symbol, "status", "zero_fill")
+		slog.Error(
+			"crossed_order_zero_fill",
+			"market", instrument.Symbol,
+			"asset_address", strings.ToLower(instrument.AssetAddress),
+			"sub_id", instrument.SubID,
+			"taker_order_id", candidate.Taker.OrderID,
+			"maker_order_id", candidate.Maker.OrderID,
+			"taker_desired_amount", candidate.Taker.DesiredAmount,
+			"taker_filled_amount", candidate.Taker.FilledAmount,
+			"maker_desired_amount", candidate.Maker.DesiredAmount,
+			"maker_filled_amount", candidate.Maker.FilledAmount,
+		)
 		return
 	}
 
+	slog.Info(
+		"match_trace_executor_submit",
+		"market", instrument.Symbol,
+		"asset_address", strings.ToLower(instrument.AssetAddress),
+		"sub_id", instrument.SubID,
+		"taker_order_id", candidate.Taker.OrderID,
+		"maker_order_id", candidate.Maker.OrderID,
+		"fill_price_ticks", fillPrice,
+		"fill_amount", fillAmount,
+	)
 	executorResp, err := e.executor.SubmitMatchForMarket(ctx, instrument.Symbol, *candidate, fillPrice, fillAmount)
 	if err != nil {
 		reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
@@ -148,12 +191,30 @@ func (e *Engine) tickInstrument(ctx context.Context, instrument instruments.Meta
 		return
 	}
 
+	slog.Info(
+		"match_trace_executor_result",
+		"market", instrument.Symbol,
+		"taker_order_id", candidate.Taker.OrderID,
+		"maker_order_id", candidate.Maker.OrderID,
+		"accepted", executorResp.Accepted,
+		"tx_hash", executorResp.TxHash,
+	)
+
 	reconcileCtx, cancel := detachedContext(ctx, reconciliationTimeout)
 	defer cancel()
 	if err := e.orders.FinalizeMatchWithPrice(reconcileCtx, candidate.Taker.OrderID, candidate.Maker.OrderID, logPrice, fillAmount); err != nil {
 		slog.Error("finalize match", "market", instrument.Symbol, "taker_order_id", candidate.Taker.OrderID, "maker_order_id", candidate.Maker.OrderID, "error", err)
 		return
 	}
+
+	slog.Info(
+		"match_trace_finalize_success",
+		"market", instrument.Symbol,
+		"taker_order_id", candidate.Taker.OrderID,
+		"maker_order_id", candidate.Maker.OrderID,
+		"fill_amount", fillAmount,
+		"fill_price", logPrice,
+	)
 
 	release = false
 

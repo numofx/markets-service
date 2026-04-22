@@ -24,6 +24,12 @@ func TestCrosses(t *testing.T) {
 			want:  true,
 		},
 		{
+			name:  "buy taker crosses by one tick",
+			taker: orders.Order{Side: orders.SideBuy, LimitPrice: "1391", LimitPriceTicks: "1391", CreatedAt: now},
+			maker: orders.Order{Side: orders.SideSell, LimitPrice: "1390", LimitPriceTicks: "1390", CreatedAt: now.Add(-time.Second)},
+			want:  true,
+		},
+		{
 			name:  "sell taker crosses higher buy maker",
 			taker: orders.Order{Side: orders.SideSell, LimitPrice: "90", LimitPriceTicks: "90", CreatedAt: now},
 			maker: orders.Order{Side: orders.SideBuy, LimitPrice: "100", LimitPriceTicks: "100", CreatedAt: now.Add(-time.Second)},
@@ -65,6 +71,19 @@ func TestCrosses(t *testing.T) {
 				t.Fatalf("crosses = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFillAmountIsNonZeroForAtomicLot(t *testing.T) {
+	taker := orders.Order{DesiredAmount: "1", FilledAmount: "0"}
+	maker := orders.Order{DesiredAmount: "1", FilledAmount: "0"}
+
+	fillAmount, err := minDecimalString(remainingAmount(taker), remainingAmount(maker))
+	if err != nil {
+		t.Fatalf("compute fill amount: %v", err)
+	}
+	if fillAmount != "1" {
+		t.Fatalf("fill amount = %s", fillAmount)
 	}
 }
 

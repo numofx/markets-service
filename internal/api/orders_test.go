@@ -293,3 +293,96 @@ func TestCreateOrderRequestToParamsRejectsMalformedSpotUIIntentContract(t *testi
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestCreateOrderRequestToParamsNormalizesAPRMinimumSizeToAtomicUnits(t *testing.T) {
+	req := createOrderRequest{
+		OrderID:       "order-apr-min-size",
+		OwnerAddress:  "0xabc",
+		SignerAddress: "0xabc",
+		SubaccountID:  "10",
+		RecipientID:   "10",
+		Nonce:         "1",
+		Side:          "buy",
+		AssetAddress:  "0xapr",
+		SubID:         "1777507200",
+		DesiredAmount: "0.001",
+		FilledAmount:  "0",
+		LimitPrice:    "1391",
+		WorstFee:      "1",
+		Expiry:        time.Now().Add(time.Hour).Unix(),
+		ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xabc","signer":"0xabc"}`),
+		Signature:     "0xsig",
+	}
+
+	params, err := req.toParams(config.Config{
+		CNGNApr2026FutureAssetAddress: "0xapr",
+		CNGNApr2026FutureSubID:        "1777507200",
+	})
+	if err != nil {
+		t.Fatalf("toParams returned error: %v", err)
+	}
+	if params.DesiredAmount != "1" {
+		t.Fatalf("desired amount = %s", params.DesiredAmount)
+	}
+	if params.FilledAmount != "0" {
+		t.Fatalf("filled amount = %s", params.FilledAmount)
+	}
+}
+
+func TestCreateOrderRequestToParamsRejectsAPRSubMinimumSize(t *testing.T) {
+	req := createOrderRequest{
+		OrderID:       "order-apr-sub-min-size",
+		OwnerAddress:  "0xabc",
+		SignerAddress: "0xabc",
+		SubaccountID:  "10",
+		RecipientID:   "10",
+		Nonce:         "1",
+		Side:          "buy",
+		AssetAddress:  "0xapr",
+		SubID:         "1777507200",
+		DesiredAmount: "0.0001",
+		FilledAmount:  "0",
+		LimitPrice:    "1391",
+		WorstFee:      "1",
+		Expiry:        time.Now().Add(time.Hour).Unix(),
+		ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xabc","signer":"0xabc"}`),
+		Signature:     "0xsig",
+	}
+
+	_, err := req.toParams(config.Config{
+		CNGNApr2026FutureAssetAddress: "0xapr",
+		CNGNApr2026FutureSubID:        "1777507200",
+	})
+	if err == nil || err.Error() != "desired_amount must align to amount step 0.001" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCreateOrderRequestToParamsRejectsZeroNormalizedAtomicSize(t *testing.T) {
+	req := createOrderRequest{
+		OrderID:       "order-apr-zero-size",
+		OwnerAddress:  "0xabc",
+		SignerAddress: "0xabc",
+		SubaccountID:  "10",
+		RecipientID:   "10",
+		Nonce:         "1",
+		Side:          "buy",
+		AssetAddress:  "0xapr",
+		SubID:         "1777507200",
+		DesiredAmount: "0",
+		FilledAmount:  "0",
+		LimitPrice:    "1391",
+		WorstFee:      "1",
+		Expiry:        time.Now().Add(time.Hour).Unix(),
+		ActionJSON:    json.RawMessage(`{"subaccount_id":"10","nonce":"1","module":"0xtrade","data":"0xaaa","expiry":"100","owner":"0xabc","signer":"0xabc"}`),
+		Signature:     "0xsig",
+	}
+
+	_, err := req.toParams(config.Config{
+		CNGNApr2026FutureAssetAddress: "0xapr",
+		CNGNApr2026FutureSubID:        "1777507200",
+	})
+	if err == nil || err.Error() != "normalized atomic size is 0" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
